@@ -91,20 +91,6 @@ Every write tool except `run_readonly_query` defaults to `dry_run=True`, and lar
 - **Read before write, read back after.** Write tools read the current state first and re-read it afterwards. Where a channel accepts a push but its effect cannot be seen through Linnworks (Amazon and eBay listing pushes, non-Shopify refunds), the result says so rather than reporting success.
 - **Your credentials stay with you.** The server talks only to Linnworks, plus Shopify for the one optional tool above. Nothing is sent anywhere else.
 
-## Use without the plugin
-
-The server is a single file and runs anywhere `uv` does:
-
-```bash
-git clone https://github.com/josephgurney/linnworks-claude-plugin
-```
-
-```bash
-cd linnworks-claude-plugin && uv run --frozen python server.py --list-tools
-```
-
-To register it with another MCP client, run `uv run --frozen --project <path> python <path>/server.py`, and set the `LINNWORKS_*` variables from `.env.example` in the client's `env` block.
-
 ## Development
 
 ```bash
