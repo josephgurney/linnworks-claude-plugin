@@ -1,0 +1,24 @@
+{
+  "mcpServers": {
+    "linnworks": {
+      "command": "uv",
+      "args": [
+        "run",
+        "--frozen",
+        "--project",
+        "${CLAUDE_PLUGIN_ROOT}",
+        "python",
+        "${CLAUDE_PLUGIN_ROOT}/server.py"
+      ],
+      "env": {
+        "LINNWORKS_APPLICATION_ID": "${user_config.application_id}",
+        "LINNWORKS_APPLICATION_SECRET": "${user_config.application_secret}",
+        "LINNWORKS_INSTALLATION_TOKEN": "${user_config.installation_token}",
+        "LINNWORKS_DEFAULT_SHOPIFY_SUB_SOURCE": "${user_config.default_shopify_store}",
+        "LINNWORKS_INTERNAL_SKUS": "${user_config.internal_skus}",
+        "LINNWORKS_PICKWAVE_READY_TAG": "${user_config.pickwave_ready_tag}",
+        "SHOPIFY_STORES": "${user_config.shopify_stores}"
+      }
+    }
+  }
+}

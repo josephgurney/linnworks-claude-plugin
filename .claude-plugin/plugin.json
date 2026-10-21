@@ -1,0 +1,69 @@
+{
+  "name": "linnworks",
+  "displayName": "Linnworks (unofficial)",
+  "version": "1.69.4",
+  "description": "Unofficial community plugin that connects Claude to your own Linnworks account: orders, stock, inventory, purchase orders, pickwaves and channel listings, through 104 tools. Write tools default to dry runs.",
+  "author": {
+    "name": "Joseph Gurney",
+    "url": "https://github.com/josephgurney"
+  },
+  "homepage": "https://github.com/josephgurney/linnworks-claude-plugin",
+  "repository": "https://github.com/josephgurney/linnworks-claude-plugin",
+  "license": "MIT",
+  "keywords": [
+    "linnworks",
+    "ecommerce",
+    "inventory",
+    "orders",
+    "multichannel",
+    "mcp"
+  ],
+  "userConfig": {
+    "application_id": {
+      "type": "string",
+      "title": "Linnworks Application ID",
+      "description": "From your app in the Linnworks developer portal.",
+      "required": true,
+      "sensitive": true
+    },
+    "application_secret": {
+      "type": "string",
+      "title": "Linnworks Application Secret",
+      "description": "From your app in the Linnworks developer portal.",
+      "required": true,
+      "sensitive": true
+    },
+    "installation_token": {
+      "type": "string",
+      "title": "Linnworks installation token",
+      "description": "The permanent token shown when you install your app at apps.linnworks.net/Authorization/Authorize/<Application ID>.",
+      "required": true,
+      "sensitive": true
+    },
+    "default_shopify_store": {
+      "type": "string",
+      "title": "Default Shopify store (optional)",
+      "description": "The Linnworks SubSource name of the Shopify store the listing tools act on when you don't name one. Leave blank to be asked each time.",
+      "default": ""
+    },
+    "internal_skus": {
+      "type": "string",
+      "title": "Internal marker SKUs (optional)",
+      "description": "Comma-separated SKUs you add to orders on purpose (gift wrap, notes flags). find_unlinked_order_lines will not report them as orphaned.",
+      "default": ""
+    },
+    "pickwave_ready_tag": {
+      "type": "string",
+      "title": "Pick-ready order tag (optional)",
+      "description": "An order identifier (tag) that marks an order as ready to pick. generate_pick_waves warns about any order without it. Leave blank for no check.",
+      "default": ""
+    },
+    "shopify_stores": {
+      "type": "string",
+      "title": "Shopify Admin access (optional)",
+      "description": "Only for repair_channel_listing_images. JSON keyed by Linnworks SubSource, e.g. {\"My Store\":{\"shop_domain\":\"x.myshopify.com\",\"access_token\":\"shpat_...\"}}.",
+      "default": "",
+      "sensitive": true
+    }
+  }
+}

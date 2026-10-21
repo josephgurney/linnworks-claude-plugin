@@ -1,0 +1,22 @@
+[project]
+name = "linnworks-claude-plugin"
+version = "1.69.4"
+description = "Unofficial Claude plugin and MCP server for your own Linnworks account"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+dependencies = [
+    "mcp>=1.29.0,<2",
+    "requests>=2.33.0",
+    "python-dotenv>=1.0.0",
+]
+
+[dependency-groups]
+dev = ["pytest>=8"]
+
+[tool.uv]
+# The server runs as a script (server.py); there is nothing to build or install.
+package = false
+
+[tool.pytest.ini_options]
+pythonpath = ["."]

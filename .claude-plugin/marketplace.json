@@ -1,0 +1,17 @@
+{
+  "name": "linnworks-plugins",
+  "owner": {
+    "name": "Joseph Gurney",
+    "url": "https://github.com/josephgurney"
+  },
+  "description": "Unofficial community plugins for Linnworks.",
+  "plugins": [
+    {
+      "name": "linnworks",
+      "source": "./",
+      "description": "Connect Claude to your own Linnworks account: orders, stock, inventory, purchase orders, pickwaves and channel listings.",
+      "category": "productivity",
+      "tags": ["linnworks", "ecommerce", "inventory", "orders"]
+    }
+  ]
+}
