@@ -9,6 +9,9 @@
   },
   "homepage": "https://github.com/josephgurney/linnworks-claude-plugin",
   "repository": "https://github.com/josephgurney/linnworks-claude-plugin",
+  "documentationUrl": "https://github.com/josephgurney/linnworks-claude-plugin#readme",
+  "supportUrl": "https://github.com/josephgurney/linnworks-claude-plugin/issues",
+  "privacyPolicyUrl": "https://github.com/josephgurney/linnworks-claude-plugin/blob/main/PRIVACY.md",
   "license": "MIT",
   "keywords": [
     "linnworks",
