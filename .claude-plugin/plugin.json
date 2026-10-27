@@ -1,7 +1,7 @@
 {
   "name": "linnworks",
   "displayName": "Linnworks (unofficial)",
-  "version": "1.69.4",
+  "version": "1.69.5",
   "description": "Unofficial community plugin that connects Claude to your own Linnworks account: orders, stock, inventory, purchase orders, pickwaves and channel listings, through 104 tools. Write tools default to dry runs.",
   "author": {
     "name": "Joseph Gurney",
