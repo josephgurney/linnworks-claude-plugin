@@ -1,6 +1,6 @@
 [project]
 name = "linnworks-claude-plugin"
-version = "1.69.4"
+version = "1.69.5"
 description = "Unofficial Claude plugin and MCP server for your own Linnworks account"
 readme = "README.md"
 requires-python = ">=3.10"

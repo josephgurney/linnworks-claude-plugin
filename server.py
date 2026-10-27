@@ -1,7 +1,7 @@
 """Linnworks MCP server: connects Claude to your own Linnworks account."""
 from __future__ import annotations
 
-__version__ = "1.69.4"
+__version__ = "1.69.5"
 
 import json
 import os
@@ -986,80 +986,51 @@ def list_inventory_items(
     max_items: int = 5000,
 ) -> dict:
     """
-    Enumerate ACTIVE inventory items with their stock levels — the bulk
-    "give me everything" counterpart to search_inventory_items (keyword) and
-    find_inventory_item (exact SKU).
+    Enumerate ACTIVE inventory items with their stock levels: the "give me
+    everything" counterpart to search_inventory_items (keyword) and
+    find_inventory_item (exact SKU). Typical use is a catalogue cleanup: find
+    what is out of stock everywhere, then check it with find_composite_parents
+    before delist_all_channel_listings and archive_inventory_items.
 
-    Built for the catalogue-cleanup sweep: "give me every active stock item with
-    its current quantity, so I can find everything that's out of stock across all
-    locations", then feed those SKUs to find_composite_parents (the archive gate),
-    delist_all_channel_listings, and archive_inventory_items.
+    Stock is per location. With include_stock_levels=True each item carries a
+    `locations` breakdown, and `quantity`/`available`/`in_order`/`due` are summed
+    across all locations. Stock can sit outside Default (e.g. supplier-mirror
+    locations), so a Default-only zero is not dead stock. Pass `location_id` to
+    measure one location instead.
 
-    PER-LOCATION STOCK is the point. With include_stock_levels=True (default) each
-    item carries a `locations` breakdown, and `quantity`/`available`/`in_order` are
-    the SUM across every location. That is what makes "out of stock EVERYWHERE"
-    answerable — an account that mirrors suppliers' stock into their own locations
-    can hold stock outside Default, so a Default-only zero is NOT dead stock. Pass `location_id` to scope
-    the figures to one location instead.
+    ⚠️ ACTIVE ITEMS ONLY. Archived items are never returned, and no endpoint lists
+    them (only a UI/Data export).
 
-    ⚠️ ACTIVE ITEMS ONLY. Like every Linnworks list/search endpoint, this never
-    returns archived items (~32k active vs ~93k including archived here). "Every
-    stock item" means every ACTIVE one; there is no endpoint that enumerates
-    archived stock (only a UI/Data export).
-
-    COST. One API call per 200 items. all_pages=True sweeps the whole catalogue —
-    ~170 calls / ~90s for a large catalogue (~34k items) — so it is an AUTOPAGINATING tool: never run
-    it in parallel with another one (get_top_skus, find_composite_parents, the
-    category sweep …), they will rate-limit each other. It throttles under the
-    150/min limit and backs off on 429.
+    ⚠️ COST: one call per 200 items. all_pages=True sweeps the whole catalogue
+    (roughly 170 calls for 34k items) and must never run in parallel with another
+    sweeping tool (get_top_skus, find_composite_parents, …); they rate-limit each
+    other.
 
     Args:
-        page: 1-based page number (ignored when all_pages=True).
-        per_page: Items per page (default 200, the Linnworks maximum).
-        all_pages: Sweep the entire catalogue instead of one page. Expensive —
-            see COST above. Pair with zero_stock_only / max_items to keep the
-            response manageable.
-        include_stock_levels: Load the per-location StockLevels (default True).
-            Set False for a faster metadata-only listing — quantities then come
-            back as None (meaning "not read", NOT zero).
-        location_id: Scope quantities to one location's stock only (from
-            get_locations; Default is the zero-GUID). Requires
-            include_stock_levels. Items with no stock row at that location report
-            zero and an empty `locations` list.
-        zero_stock_only: Return only items whose quantity is zero in the scope
-            being measured — i.e. across ALL locations by default, or at
-            `location_id` when scoped. This is the cleanup-candidate filter.
-            Requires include_stock_levels.
-        include_composite_parents: Include composite/bundle parent items
-            (default True). These are INCLUDE flags on the Linnworks side —
-            setting this False makes bundle parents ABSENT from the results, which
-            is what a cleanup sweep usually wants (a parent carries no stock of
-            its own), but means the listing is no longer the full catalogue.
-        include_variation_parents: Same, for variation-group parents (default True).
-        flag_composite_parents: Fill each item's `is_composite_parent`. The
-            endpoint behind this tool does NOT carry that field, so it is derived
-            from the composite index used by find_composite_parents — which costs
-            ~215 extra API calls to build the first time, then is cached for 15
-            minutes. Leave False (the default) and `is_composite_parent` stays
-            None, meaning "not determined". `is_variation_parent` is always real.
-        max_items: Safety cap on how many item rows are RETURNED (default 5000).
-            The sweep still completes and the counts still cover everything
-            scanned — only the `items` detail is truncated, flagged by
-            `truncated: true`.
+        page: 1-based page (ignored when all_pages=True).
+        per_page: Items per page; 200 is the maximum.
+        all_pages: Sweep the whole catalogue. Pair with zero_stock_only / max_items.
+        include_stock_levels: Default True. False is faster, but quantities come
+            back None, meaning "not read", NOT zero.
+        location_id: Measure one location only (needs include_stock_levels).
+        zero_stock_only: Return only items at zero in the scope measured (all
+            locations, or `location_id`). Needs include_stock_levels.
+        include_composite_parents: Default True. False makes bundle parents ABSENT
+            from the results (they hold no stock of their own), so the list is no
+            longer the full catalogue.
+        include_variation_parents: Same, for variation parents.
+        flag_composite_parents: Fill `is_composite_parent`, which this endpoint
+            doesn't return. Costs about 215 calls to build the composite index the
+            first time (then cached 15 minutes). Left False, it stays None, meaning
+            "not determined". `is_variation_parent` is always real.
+        max_items: Cap on rows returned (default 5000). The sweep and the counts
+            still cover everything; only `items` is cut, with `truncated: true`.
 
     Returns:
-        A dict with:
-          - scope:          active_only / location / parent-flag settings in force
-          - pages_fetched:  API pages read
-          - scanned_count:  items examined across those pages
-          - matched_count:  items passing zero_stock_only (== scanned when off)
-          - count:          item rows actually returned
-          - truncated:      True when max_items clipped the returned rows
-          - complete:       True when the whole catalogue was swept (all_pages)
-          - items:          sku, stock_item_id, title, barcode, category_name,
-                            category_id, purchase_price, quantity, available,
-                            in_order, due, is_variation_parent,
-                            is_composite_parent, locations[]
+        A dict with scope, pages_fetched, scanned_count, matched_count, count,
+        truncated, complete, and items (sku, stock_item_id, title, barcode,
+        category_name, category_id, purchase_price, quantity, available,
+        in_order, due, is_variation_parent, is_composite_parent, locations).
     """
     per_page = max(1, min(per_page, 200))
     page = max(1, page)
@@ -1719,59 +1690,34 @@ def set_order_address(
     dry_run: bool = True,
 ) -> dict:
     """
-    Update the delivery address on an open (unprocessed) Linnworks order.
+    Update the delivery address on an open (unprocessed) order; processed orders
+    are refused. Reads the current address, changes only the fields you pass, and
+    returns a before/after diff.
 
-    Handles BOTH kinds of address change:
-      - amend a line or two — pass just those fields (everything else is kept);
-      - replace the whole destination — pass every field, ideally with
-        require_complete=True so a half-supplied address is refused.
+      - To amend a line or two, pass just those fields.
+      - To change the destination, pass every field with require_complete=True,
+        so a partly supplied address can't merge with the old one (new street,
+        old town).
 
-    Reads the current address first, applies only the fields you provide
-    (all others remain unchanged), then writes the change back. Always
-    returns a before/after diff so you can confirm exactly what would change.
-    Already-processed orders are rejected.
-
-    Use get_order() first to see the current delivery_address before calling
-    this tool, so you can confirm what needs changing.
-
-    IMPORTANT: dry_run defaults to True. Set dry_run=False only when you are
-    sure the change is correct — confirm with the user before doing so.
+    Check the current address with get_order first. dry_run defaults to True;
+    confirm the change with the user before setting it False.
 
     Args:
-        order_id: The order to update. Accepts either a GUID pkOrderID
-            (e.g. "a1b2c3d4-...") or a numeric order number (e.g. "596475").
-        full_name: Recipient full name. Pass None (default) to keep current.
-        company: Company name. Pass None to keep current.
-        address1: First line of the street address. Pass None to keep current.
-        address2: Second address line. Pass None to keep current.
-        address3: Third address line. Pass None to keep current.
-        town: Town or city. Pass None to keep current.
-        region: County, state, or region. Pass None to keep current.
-        postcode: Postcode or ZIP code. Pass None to keep current.
-        country: Country name (e.g. "United Kingdom"). Pass None to keep current.
-        phone: Phone number. Pass None to keep current.
-        email: Email address. Pass None to keep current.
-        save_to_crm: If True, saves the updated address into the Linnworks CRM
-            record for this customer. Defaults to False.
-        require_complete: Guard for whole-address changes. When True, the call is
-            REFUSED unless you supply all five core fields — full_name, address1,
-            town, postcode, country — non-blank. Use it whenever the destination
-            itself is changing (a customer address correction, a redirect), so a
-            partly-supplied address cannot silently merge with the old one and
-            ship to a hybrid of the two: new street, old town. Leave False
-            (default) when deliberately amending one or two lines.
-        dry_run: If True (default), shows the proposed changes without writing
-            anything. Set to False to apply the address update.
+        order_id: GUID pkOrderID or numeric order number.
+        full_name, company, address1, address2, address3, town, region, postcode,
+        country, phone, email: New values. None (default) keeps the current
+            value. country is the full name, e.g. "United Kingdom".
+        save_to_crm: Also save the address to the customer's CRM record. Default
+            False.
+        require_complete: Refuse unless full_name, address1, town, postcode and
+            country are all passed non-blank. Use it whenever the destination
+            changes. Default False.
+        dry_run: Default True: shows the change without writing.
 
     Returns:
-        A dict with:
-          - order_id:    the ID passed in
-          - order_guid:  the resolved GUID (useful when you passed a numeric ID)
-          - dry_run:     whether this was a dry run
-          - status:      "dry_run", "updated", "no_changes", or "error"
-          - before:      current values of the fields that would change
-          - after:       proposed/applied new values for those fields
-          - error:       present only if the update was rejected
+        order_id, order_guid, dry_run, status ("dry_run", "updated",
+        "no_changes" or "error"), before and after (the changed fields), and
+        error when rejected.
     """
     order_id = order_id.strip()
 
@@ -2779,71 +2725,32 @@ def cancel_order(
     dry_run: bool = True,
 ) -> dict:
     """
-    Cancel an open (unprocessed) Linnworks order.
+    Cancel an open (unprocessed) order with Orders/CancelOrder. A processed
+    (despatched) order is refused. Cancellations can't be undone through the API:
+    dry_run defaults to True, and you should confirm with the user before setting
+    it False.
 
-    Reads the order first to confirm it is open, then cancels it via
-    Orders/CancelOrder. Only open orders can be cancelled this way — if the
-    order is already processed (dispatched), this tool will refuse.
-
-    Note: The Linnworks CancelOrder API does not expose a return_to_stock flag.
-    Stock management on cancellation is controlled by your Linnworks workspace
+    There is no return-to-stock option; that follows your Linnworks workspace
     settings.
 
-    After a live cancellation, the order is read back FRESH -- a new call,
-    keyed on the GUID already resolved before the write, never on whatever
-    order_id was originally passed. This matters because a cancelled order
-    drops out of open-order searches, so re-resolving from a numeric order
-    number afterwards can fail and look like the cancel did not work, even
-    though it succeeded. The read-back only checks whether the
-    order now reads as `processed` -- cancelling has been observed to leave
-    an order still reading as parked, with its payment status unchanged, so
-    those fields are reported for information but never used to decide
-    success or failure.
-
-    IMPORTANT: dry_run defaults to True. Set dry_run=False only when you are
-    sure the cancellation is correct — confirm with the user before doing so.
-    Cancellations cannot be reversed via the API.
+    After a live cancellation the order is re-read by its GUID (a cancelled order
+    drops out of open-order searches, so a number lookup would fail). `outcome` is
+    "cancelled" (it now reads processed), "not_cancelled", "unconfirmed" (the
+    read-back failed; never reported as a failed cancel) or "rate_limited". Only
+    `processed` decides it: a cancelled order can still read as parked and keep
+    its payment status, so those are shown for information only.
 
     Args:
-        order_id: The order to cancel. Accepts a GUID pkOrderID or a numeric
-            order number (e.g. "596475").
-        note: Optional note to attach to the cancellation.
-        refund: Refund quantity to attach to the cancellation. Defaults to 0.0
-            (cancel without an attached refund). ⚠️ This field is sent on EVERY
-            call because Linnworks REQUIRES it, even though the public schema
-            marks it optional — omitting it returns a bare HTTP 400 "The request
-            is invalid." that names nothing. Live-confirmed 18 Sep 2026; before
-            that this tool never sent it and so could not have worked.
-        dry_run: If True (default), shows what would be cancelled without
-            actually cancelling. Set to False to execute.
+        order_id: GUID pkOrderID or numeric order number.
+        note: Optional note for the cancellation.
+        refund: Refund amount to attach. Default 0.0 (no refund). Always sent,
+            because Linnworks rejects a cancel without it.
+        dry_run: Default True: shows what would be cancelled.
 
     Returns:
-        A dict with:
-          - dry_run:       whether this was a dry run
-          - order_id:      the GUID
-          - num_order_id:  the numeric order number
-          - customer_name: customer name
-          - items:         list of items in the order
-          - status:        "would_cancel" (dry run) or "cancelled"
-
-        On a live run, also:
-          - outcome:              "cancelled" (read-back confirms the order
-                                   now reads processed), "not_cancelled" (the
-                                   read-back succeeded but the order still
-                                   does not read processed), "unconfirmed"
-                                   (the read-back itself failed -- NEVER
-                                   reported as a failed cancellation), or
-                                   "rate_limited" (a RateLimitError was
-                                   raised during the read-back -- distinct
-                                   from "unconfirmed", never folded into it).
-          - read_back_processed:   the fresh `processed` value, or None when
-                                   the read-back did not complete.
-          - read_back_is_parked:   the fresh `is_parked` value, reported for
-                                   information only -- a cancelled order has
-                                   been observed to still read as parked.
-          - read_back_status:      the fresh payment `status` value, also
-                                   reported for information only, for the
-                                   same reason.
+        dry_run, order_id (the GUID), num_order_id, customer_name, items, status
+        ("would_cancel" or "cancelled"); and on a live run: outcome,
+        read_back_is_parked and read_back_status.
     """
     try:
         guid, raw = _resolve_order_guid(order_id)
@@ -2940,87 +2847,44 @@ def remove_order_item(
     dry_run: bool = True,
 ) -> dict:
     """
-    Remove a single line item from an OPEN (unprocessed) Linnworks order.
+    Remove one line from an OPEN (unprocessed) order. A processed or despatched
+    order is refused.
 
-    ⚠️ UNPROVEN ENDPOINT: Orders/RemoveOrderItem has only ever been probed
-    for existence with a deliberately invalid payload against a placeholder
-    GUID — this build has never fired it against a real order.
-    Every response from a live run (dry_run=False) carries an explicit
-    unproven warning telling you to verify the order in the Linnworks UI and
-    to re-run find_unlinked_order_lines on the SAME order afterwards, since a
-    related order-item write has been observed to orphan the channel
-    reference on lines you did NOT touch. The first live call
-    against a real order is a deliberate, owner-run step.
+    ⚠️ NEVER FIRED BY THIS TOOL. Every live response carries an unproven warning:
+    check the order in the Linnworks UI afterwards, and re-run
+    find_unlinked_order_lines on the SAME order, because a related order-item
+    write has been seen to orphan the channel link on lines that were not touched.
+    There is no known way to undo a removal through the API, so review the
+    manifest with the user before setting dry_run=False.
 
-    Reads the order fresh via _resolve_order_guid to locate the targeted line
-    by its row_id (the OrderItemRowId from get_order's items list) and to
-    confirm the order is still open — an already-processed (despatched) order
-    is refused, mirroring cancel_order. If the targeted line is a composite
-    parent, the dry-run manifest also lists its component children (SKU and
-    quantity each) under removed_line["composite_children"], since get_order
-    does not surface a separate row_id per composite child and removing the
-    parent line removes every child with it.
+    Refused before any write: an unknown row_id (get row ids from get_order), and
+    removing the LAST line on an order unless allow_empty_order=True (what a
+    zero-line order does downstream is unknown). If the line is a composite
+    parent, the manifest lists its children under
+    removed_line["composite_children"]; removing the parent removes them too.
 
-    Removing the LAST remaining line on an order is blocked by default —
-    nothing in the Linnworks API prevents a resulting zero-line order, and
-    its behaviour downstream (dispatchable or not) is unknown. Pass
-    allow_empty_order=True to proceed anyway.
-
-    On a live run the payload sent to Orders/RemoveOrderItem is exactly
-    {"orderId", "rowid", "fulfilmentCenter"} — the fulfilment centre is taken
-    from the order's own FulfilmentLocationId, falling back to the Linnworks
-    Default location only when the order carries none. Passing location_id
-    overrides both. After the write, the order is read back FRESH (a new
-    call, never the pre-write object already in hand — and always by GUID,
-    even when order_id was originally supplied as a numeric order number) and
-    classified:
-      - "removed"       the row_id is genuinely absent from the fresh read
-      - "still_present" the row_id is still on the fresh read — Linnworks
-                         accepted the call but did not remove the line
-      - "unconfirmed"    the read-back itself failed or was rate-limited —
-                         NEVER defaulted to success, and never described as
-                         "line not found"
-    A RateLimitError raised by any call this tool makes (resolving the order,
-    the write itself, or the read-back) is reported as outcome
-    "rate_limited" — distinct from both "row not found" and a failed-removal
-    outcome, and never folded into either.
-
-    The live response also reports order_total_before and order_total_after
-    (Linnworks' own TotalsInfo.TotalCharge), since whether Linnworks
-    recalculates the order total after a line removal is unknown — a total
-    that did not change is visible here, not silently assumed correct.
-
-    IMPORTANT: dry_run defaults to True. This removes a line from a real
-    customer order and there is no known way to undo it via the API — always
-    review the manifest with the user before setting dry_run=False.
+    After a live write the order is re-read and the outcome is "removed",
+    "still_present" (accepted but the line is still there), "unconfirmed" (the
+    read-back failed; never reported as success or "not found") or
+    "rate_limited". order_total_before and order_total_after are always shown,
+    because whether Linnworks recalculates the total is not guaranteed.
 
     Args:
-        order_id: The order to modify. Accepts a GUID pkOrderID or a numeric
-            order number (e.g. "596475").
-        row_id: The OrderItemRowId of the line to remove — from get_order's
-            items list (the "row_id" field on each item).
-        location_id: Fulfilment centre GUID to send with the removal.
-            Defaults to the order's own fulfilment location, falling back to
-            the Default location only when the order carries none. Supplying
-            this overrides both.
-        allow_empty_order: Must be True to remove the last remaining line on
-            an order. Defaults to False so the tool never silently empties
-            an order.
-        dry_run: If True (default), shows exactly what would be removed
-            (including any composite children) without writing anything.
-            Set to False to execute.
+        order_id: GUID pkOrderID or numeric order number.
+        row_id: The line's row_id from get_order.
+        location_id: fulfilmentCenter to send. Defaults to the order's own
+            fulfilment location, then the Default location.
+        allow_empty_order: Must be True to remove an order's last line.
+            Default False.
+        dry_run: Default True: shows what would be removed, writes nothing.
 
     Returns:
-        A dict. On any refusal (unresolvable order_id, unknown row_id,
-        processed order, last-line block) an "error" key is set and no write
-        call is made. Otherwise: dry_run, order_id, num_order_id,
-        customer_name, reference_num, external_reference, row_id,
-        removed_line (sku, title, quantity, price_per_unit, line_total, and
-        composite_children when applicable), remaining_line_count_before,
-        order_total_before, currency — plus, once a live write has been
-        attempted: outcome ("removed" / "still_present" / "unconfirmed" /
-        "rate_limited"), remaining_line_count, order_total_after,
-        linnworks_response, and unproven_warning.
+        On a refusal, an "error" key and nothing written. Otherwise: dry_run,
+        order_id, num_order_id, customer_name, reference_num, external_reference,
+        row_id, removed_line (sku, title, quantity, price_per_unit, line_total,
+        composite_children), remaining_line_count_before, order_total_before,
+        currency; and after a live write: outcome, remaining_line_count,
+        order_total_after, linnworks_response, unproven_warning.
     """
     order_id = order_id.strip()
     row_id = row_id.strip()
@@ -3580,152 +3444,74 @@ def relink_order_line(
     dry_run: bool = True,
 ) -> dict:
     """
-    Restore a single order line's channel identity (ItemNumber/ItemSource)
-    via Orders/UpdateOrderItem — the repair half of the pair started by
-    find_unlinked_order_lines, which only detects an orphaned
-    line and ships no fix.
+    Restore an orphaned order line's channel link (ItemNumber and ItemSource) with
+    Orders/UpdateOrderItem. Use it on lines find_unlinked_order_lines reports as
+    unlinked. Open orders only: a processed or despatched order is refused, because
+    it can't be repaired this way.
 
-    ⚠️ UNPROVEN ENDPOINT: Orders/UpdateOrderItem has only ever been probed
-    for existence with a deliberately invalid payload against a placeholder
-    GUID — this build has never fired it against a real order.
-    Every response from a live run (dry_run=False) carries an explicit
-    unproven warning telling you that a 2xx here is NOT proof the channel
-    link was restored, and to re-run find_unlinked_order_lines on the SAME
-    order afterwards. It separates two unknowns: whether ItemNumber/
-    ItemSource persist on Linnworks' own order record (which this tool's
-    fresh read-back answers on every live run — see the outcomes below), and
-    whether despatch then maps the line back to its storefront line (which
-    no read of Linnworks can answer). The first live call against a real order is a
-    deliberate, owner-run step.
+    Live-proven on Default-location orders. There are two separate questions:
+    whether the fields persist on Linnworks' order record, and whether
+    despatch then maps the line back to its storefront line. Both are proven: ItemNumber
+    persists, ItemSource persists for any non-empty value (an empty one is ignored
+    behind a 200), and despatch matches the storefront line by ItemNumber. This
+    tool's read-back answers the first question on every live run; only the
+    storefront, after despatch, can answer the second.
 
-    Reads the order fresh via _resolve_order_guid to confirm it is still
-    open (an already-processed/despatched order is refused — a despatched
-    order cannot be repaired this way) and to locate the targeted line by
-    its row_id from the order's RAW Items array — never from either of this
-    repo's flattened item shapes, both of which drop most of the raw line
-    (discount, tax-inclusive cost, bin racks, weight, barcode, market/
-    service flags). An unknown row_id is refused, naming the row_id and
-    pointing at get_order.
+    ⚠️ A WRONG channel_line_id is worse than a missing one: despatch then fulfils
+    the WRONG storefront line, silently and successfully. So channel_line_id is
+    required and never guessed. find_unlinked_order_lines can't catch a
+    mis-pointed link afterwards (a line reads as linked once ItemSource is
+    non-blank), so check the id against the storefront order before writing.
 
-    channel_line_id is the replacement storefront line id and is REQUIRED —
-    it is never derived, defaulted, or guessed by this tool. A blank or
-    omitted value is refused: a guessed or mistyped id would point despatch
-    at the wrong storefront line, converting a visible failure into a
-    silent mis-fulfilment, which is worse than leaving the line blank.
+    ⚠️ LOCATION SCOPE: every proving order sat at the Default location, where the
+    fulfilmentCenter this tool derives from the order is the zero GUID. Whether
+    fulfilmentCenter's value matters at any other location has never been tested.
+    The manifest shows the value that will be sent and the order's own location,
+    and warns when either isn't Default or the two differ.
 
-    channel_line_source defaults to the order's own Source value (e.g.
-    "Shopify") when not supplied — this default is shown in the manifest
-    explicitly labelled as derived, distinct from a caller-supplied value,
-    which is also shown and labelled as such. Passing channel_line_source
-    always overrides the default.
+    Refused before any write:
+      - an unknown row_id (get row ids from get_order);
+      - a missing or blank channel_line_id;
+      - a line whose ItemSource is already non-blank, unless
+        allow_relink_of_linked_line=True, because a source-only fix makes a wrong
+        line read as healthy;
+      - a payload that would change anything other than ItemNumber and ItemSource.
+        The line is sent back as its raw item with only those two fields changed,
+        and any other difference (price, quantity, tax) aborts the write.
 
-    A line whose CURRENT channel_line_source is already non-blank looks
-    linked, not orphaned — find_unlinked_order_lines classifies purely on
-    that field being non-blank, so restoring only ItemSource on an already-
-    linked line would make the detector report a healthy line that never
-    actually got its correct ItemNumber. This tool therefore refuses to
-    touch an already-linked line by default; pass
-    allow_relink_of_linked_line=True to override.
+    After a live write the order is re-read and the outcome is "relinked",
+    "not_persisted" (accepted but the fields didn't change), "unconfirmed" (the
+    read-back failed or couldn't find the line) or "rate_limited". Any other field
+    that changed is listed in `unexpected_field_changes`.
 
-    The OrderItem sent to Orders/UpdateOrderItem is the target line's raw
-    item object, round-tripped verbatim, with ONLY ItemNumber and ItemSource
-    changed — see _build_relink_order_item. Before any write, the
-    constructed payload is compared back against the raw item it was built
-    from (_relink_payload_unexpected_diff); if any key other than
-    ItemNumber/ItemSource is missing, added, or changed, the write is
-    aborted with no call made — an identity-only edit that also drifts a
-    cost or quantity value would silently reprice a live order.
-
-    On a live run the payload sent is exactly {"orderId", "orderItem",
-    "fulfilmentCenter", "source", "subSource"} — fulfilmentCenter follows
-    the same FulfilmentLocationId-falling-back-to-Default pattern as
-    remove_order_item/cancel_order, and source/subSource are the order's
-    own Source/SubSource. After the write, the order is read back FRESH (a
-    new call, never the pre-write object already in hand — and always by
-    GUID, even when order_id was originally supplied as a numeric order
-    number) and classified:
-      - "relinked"      the fresh read shows BOTH ItemNumber and ItemSource
-                         now matching the intended values
-      - "not_persisted" Linnworks accepted the call (2xx) but the fresh
-                         read shows the identity fields did not take
-      - "unconfirmed"    the read-back itself failed, or could not locate
-                         the line at all — NEVER defaulted to success, and
-                         never described as "line not found"
-      - "rate_limited"   a RateLimitError was raised while resolving the
-                         order, while writing, or while reading back —
-                         distinct from "not_persisted" and "unconfirmed"
-
-    ⚠️ LOCATION SCOPE: this tool derives fulfilmentCenter from
-    the order in every case, and on every proving order the fulfilmentCenter
-    VALUE that reached Linnworks was the Default/zero GUID (see
-    UPDATE_ORDER_ITEM_PROOF_SHAPE) — at that location this tool's derivation
-    and a caller that simply hard-codes the zero GUID send identical bytes,
-    so the proof covers DEFAULT-LOCATION ORDERS ONLY and cannot tell the two
-    apart there. Whether fulfilmentCenter's VALUE has any effect on this
-    endpoint at all is FULFILMENT_CENTER_EFFECT_OBSERVED, which starts
-    never_attempted — nothing has ever sent a fulfilmentCenter that
-    disagreed with the order's real location. A caller elsewhere that
-    hard-codes fulfilmentCenter to a fixed value regardless of the order's
-    real location is therefore NOT covered by this proof at a non-Default
-    location. The manifest (dry_run or live) always shows the
-    fulfilmentCenter this call will send and flags it when the order does
-    not sit at the Default location.
-
-    The same read-back also compares every OTHER field on the line against
-    its pre-write value and reports any that changed under the distinct key
-    "unexpected_field_changes" — money and quantity ride on the same
-    OrderItem object as the identity fields, so a drifted price or quantity
-    must be visible here, never swallowed by a clean-looking outcome.
-
-    IMPORTANT: dry_run defaults to True. This writes to a real customer
-    order via an endpoint that has never been fired live — always review
-    the manifest with the user before setting dry_run=False.
+    dry_run defaults to True. This edits a real customer order, so review the
+    manifest with the user before setting dry_run=False.
 
     Args:
-        order_id: The order to modify. Accepts a GUID pkOrderID or a numeric
-            order number (e.g. "596475").
-        row_id: The OrderItemRowId of the line to repair — from get_order's
-            items list (the "row_id" field on each item).
-        channel_line_id: The correct storefront line id to write as
-            ItemNumber. REQUIRED — never derived, defaulted, or guessed.
-            Omitted or blank is refused.
-        channel_line_source: The channel name to write as ItemSource.
-            Defaults to the order's own Source value when omitted; passing
-            this overrides the default. Shown in the manifest either way,
-            labelled as derived or supplied.
+        order_id: GUID pkOrderID or numeric order number.
+        row_id: The line's row_id from get_order.
+        channel_line_id: The correct storefront line id, written as ItemNumber.
+            Required; never derived, defaulted or guessed.
+        channel_line_source: Written as ItemSource. Defaults to the order's own
+            Source; the manifest labels it "derived_from_order_source" or
+            "supplied".
         allow_relink_of_linked_line: Must be True to write to a line whose
-            current channel_line_source is already non-blank. Defaults to
-            False so the tool never touches a line that already looks
-            linked.
-        location_id: Fulfilment centre GUID to send with the update.
-            Defaults to the order's own fulfilment location, falling back
-            to the Default location only when the order carries none.
-            Supplying this overrides both. This proof only covers the
-            Default location — see the LOCATION SCOPE note above.
-        dry_run: If True (default), shows exactly what would be written
-            (current vs intended identity values) without writing anything.
-            Set to False to execute.
+            ItemSource is already non-blank. Default False.
+        location_id: fulfilmentCenter to send. Defaults to the order's own
+            fulfilment location, then the Default location. Only Default is
+            proven (see LOCATION SCOPE).
+        dry_run: Default True: shows current vs intended values, writes nothing.
 
     Returns:
-        A dict. On any refusal (unresolvable order_id, unknown row_id,
-        processed order, missing channel_line_id, already-linked line
-        without override) an "error" key is set and no write call is made.
-        Otherwise: order_id, num_order_id, customer_name, reference_num,
-        external_reference, row_id, line (sku, title, quantity),
-        channel_line_id_before/after, channel_line_source_before/after,
-        channel_line_source_origin ("derived_from_order_source" or
-        "supplied"), fulfilment_center (the value this call will send),
-        fulfilment_center_is_default (bool — whether the value about to be
-        SENT is the Default location), order_fulfilment_location (the
-        order's OWN location, ignoring any location_id override),
-        order_fulfilment_location_is_default (bool),
-        fulfilment_center_location_mismatch (bool — whether the value about
-        to be sent differs from the order's own location), and
-        fulfilment_center_warning (present whenever the order itself sits
-        away from the Default location OR the two disagree — see LOCATION
-        SCOPE above) — plus, once a live write has been attempted: outcome
-        ("relinked" / "not_persisted" / "unconfirmed" / "rate_limited"),
-        linnworks_response, unexpected_field_changes, and unproven_warning.
+        On a refusal, an "error" key and nothing written. Otherwise: order_id,
+        num_order_id, customer_name, reference_num, external_reference, row_id,
+        line (sku, title, quantity), channel_line_id_before/after,
+        channel_line_source_before/after, channel_line_source_origin,
+        fulfilment_center (the value to be sent), fulfilment_center_is_default,
+        order_fulfilment_location (the order's own), order_fulfilment_location_is_default,
+        fulfilment_center_location_mismatch, fulfilment_center_warning; and after
+        a live write: outcome, linnworks_response, unexpected_field_changes,
+        unproven_warning.
     """
     order_id = order_id.strip()
     row_id = row_id.strip()
@@ -4120,97 +3906,75 @@ def create_order(
     dry_run: bool = True,
 ) -> dict:
     """
-    Create a manual customer order in Linnworks (Orders/CreateOrders).
+    Create a manual customer order in Linnworks (Orders/CreateOrders): phone or
+    trade orders, and CS replacements and resends (e.g. qty 1 at £0.00 to a new
+    address).
 
-    For phone / trade orders keyed in by hand, and for CS replacements and
-    resends (lost parcel, damaged goods — qty 1 at £0.00 to a replacement
-    address). This is the one step of that workflow that otherwise has to be
-    done in the Linnworks UI.
+    ⚠️ CREATES A REAL, PICKABLE, DISPATCHABLE ORDER. dry_run defaults to True: it
+    resolves every SKU, validates the postal service and payment method, checks
+    for a duplicate reference and shows the exact order, writing nothing. Set
+    dry_run=False only after reading that.
 
-    ⚠️  CREATES A REAL, PICKABLE, DISPATCHABLE ORDER. dry_run defaults to True:
-        it resolves every SKU, validates the postal service and payment method,
-        checks for a duplicate reference and shows the exact order that would be
-        created, writing nothing. Set dry_run=False only after reading that.
+    Live-proven on the Default location for paid, resend and unpaid orders. A 2xx
+    still only means Linnworks accepted the payload, not that THIS order is right,
+    so a live result is reported "unconfirmed", never "success", with the order
+    read back verbatim. Check it in the UI before it is picked.
 
-    ✅  LIVE-PROVEN 18 Sep 2026 on the Default location: paid, resend and
-        unpaid orders were each created, read back and cancelled. A 2xx still
-        only means Linnworks accepted the payload, not that THIS order is
-        right — so every live result is reported as "unconfirmed", never
-        "success", and the order is read back and reported verbatim. Check it
-        in the UI before letting it pick.
+    Refused before any write: an unknown SKU, postal service, payment method or
+    location; a duplicate reference_number; unrecognised address fields; a bad
+    dispatch_by.
 
     Args:
-        items: JSON array of lines. Each needs "sku", "quantity", "price"
-            (price per unit — £0.00 is valid, which is what a CS replacement
-            uses). Optional per line: "tax_rate" (default 20.0), "title"
-            (defaults to the item's own title), "line_id" (the channel line
-            number; defaults to the SKU — supply it when two lines share a SKU).
+        items: JSON array of lines. Each needs "sku", "quantity" and "price"
+            (per unit; £0.00 is valid). Optional: "tax_rate" (default 20.0),
+            "title" (defaults to the item's title), "line_id" (defaults to the SKU;
+            supply it when two lines share a SKU).
             Example: '[{"sku":"ABC-123","quantity":1,"price":0.00}]'
         delivery_address: JSON object. Required: full_name, address1, town,
             postcode, country. Optional: company, address2, address3, region,
             phone, email.
         billing_address: JSON object, same shape. Defaults to delivery_address.
         payment_status: "paid" (default) | "unpaid" | "resend".
-            • "paid"   → order lands in the dispatch queue.
-            • "unpaid" → ⚠️ Linnworks FORCE-PARKS it. Per the ChannelOrder spec:
-              "If Unpaid ChannelOrderAdapter.Save() will ensure order is PARKED".
-              The order will NOT be in the queue whatever we send. This tool
-              predicts that in the manifest rather than promising otherwise.
-            • "resend" → ⚠️ TWO WRITES. RESEND is not on ChannelOrder's
-              PaymentStatus enum (Unpaid/Paid/Cancelled only) — it belongs to
-              Orders/ChangeStatus. The order is created Paid, then flipped with
-              ChangeStatus(4). If that second call fails the order ALREADY
-              EXISTS and is live as Paid; the result says so explicitly with
-              outcome "created_but_status_not_set".
-        source: Order source. Defaults to "DIRECT" — the value this codebase
-            already treats as a manual order (_NON_CHANNEL_ORDER_SOURCES).
-            ⚠️ "AMAZON" is REFUSED before any write: Linnworks will not save a
-            created order with that Source ("reserved for linnworks integrated
-            channels", live-confirmed 22 Sep 2026). Other real
-            channels ("SHOPIFY", "EBAY") are untested — Linnworks may refuse
-            them the same way, which is reported as a clear error with nothing
-            created. If one is accepted, how its lines classify in
-            find_unlinked_order_lines is unverified. The tool warns.
-        sub_source: Sub-source label, e.g. "Phone", "Trade", "CS Replacement".
-        reference_number: Your reference. Used to block duplicates — a matching
-            open order aborts the write (Orders/CreateOrders silently skips
-            already-paid orders on save, so a re-run would look successful and
-            do nothing).
-        external_reference: Link back to an original order, e.g. the order being
-            replaced.
-        postal_service: Postal service NAME, validated against the tenant's own
-            list. A name that doesn't exist is refused rather than created
-            (SavePostalServiceIfNotExist=false), so a typo can't leave junk
-            behind. Blank lets Linnworks' own rules assign one.
+            • "paid": the order lands in the dispatch queue.
+            • "unpaid": ⚠️ Linnworks FORCE-PARKS it, whatever is sent, so it will
+              NOT be in the dispatch queue. The manifest predicts this.
+            • "resend": ⚠️ TWO WRITES. The order is created Paid, then set to
+              RESEND with Orders/ChangeStatus. If the second call fails the order
+              ALREADY EXISTS as Paid; the outcome is "created_but_status_not_set"
+              and you must not re-run.
+        source: Order source. Default "DIRECT" (a manual order). ⚠️ "AMAZON" is
+            refused before any write, because Linnworks won't save it. Other real
+            channels are untested: Linnworks may refuse them the same way, which
+            is reported as an error with nothing created.
+        sub_source: Label such as "Phone", "Trade" or "CS Replacement".
+        reference_number: Your reference. A matching open order blocks the write,
+            because CreateOrders silently skips an already-paid order on save, so
+            a re-run would look successful and do nothing.
+        external_reference: Link to an original order, e.g. the one being replaced.
+        postal_service: Postal service NAME, validated against your list (a typo is
+            refused, never created). Blank lets Linnworks assign one. The rules
+            engine may reassign it anyway once the order reaches the queue; that is
+            reported under `notes`.
         payment_method: Payment method NAME, validated the same way.
         postage_cost: Postage charged, inclusive of tax.
-        prices_include_tax: Whether "price" on each line is tax-INCLUSIVE.
-            Defaults True (UK retail). Maps to ChannelOrderItem
-            .TaxCostInclusive. True is verified live (18 Sep 2026: £1.95 at
-            20% came back as 1.625 + 0.325 tax = 1.95). ⚠️ False has never
-            been sent live — check the totals if you use it.
-        dispatch_by: When the order must be dispatched by, ISO format
-            (e.g. "2026-09-19" or "2026-09-19T14:00:00"). ⚠️ REQUIRED BY
-            LINNWORKS even though the spec documents it as an ordinary optional
-            field — an empty value returns HTTP 400 "has an empty DispatchBy"
-            (live-confirmed 18 Sep 2026). Defaults to 1 day from now. Note it
-            drives the overdue flag: setting it to the current time makes the
-            order INSTANTLY overdue in get_open_orders(overdue_only=True).
-        note: Internal note added to the order, saving a second call.
-        location_id: Fulfilment location, as a GUID or a location name.
-            Defaults to Default. Orders/CreateOrders wants the location NAME
-            (the GUID returns "Location not found."), so this is translated
-            before sending; only "Default" is live-proven. An unknown
-            location is refused before any write.
-        confirmed_count: Echo back the number of LINES when staging triggers
-            (orders over 10 lines).
-        dry_run: True (default) shows the order without creating it.
+        prices_include_tax: Whether each line's "price" includes tax. Default True,
+            verified live. ⚠️ False has never been sent live; check the totals.
+        dispatch_by: Despatch deadline, ISO ("2026-09-19" or
+            "2026-09-19T14:00:00"). Linnworks requires one; defaults to 1 day from
+            now. It drives the overdue flag, so the current time makes the order
+            instantly overdue.
+        note: Internal note to add to the order.
+        location_id: Fulfilment location, as a GUID or a name. Defaults to
+            Default; translated to the location name Linnworks needs. Only
+            "Default" is live-proven.
+        confirmed_count: Orders over 10 LINES stage; echo back the line count.
+        dry_run: Default True: shows the order without creating it.
 
     Returns:
-        dry run  — status "dry_run" with the full manifest.
-        live run — status "unconfirmed" (never "success") plus order_id,
-        num_order_id, the read-back, and any warnings.
-        blocked  — status "error"/"blocked" with the reason and NO write made.
+        dry run: status "dry_run" with the full manifest.
+        live run: status "unconfirmed" (never "success"), order_id, num_order_id,
+            the read-back, notes and any warnings.
+        blocked: status "error" or "blocked" with the reason, and no write made.
     """
     cache: dict = {}
     warnings: list[str] = []
@@ -5179,76 +4943,45 @@ def set_order_status(
     dry_run: bool = True,
 ) -> dict:
     """
-    Change the workflow status of one or more Linnworks orders.
+    Change the workflow status of one or more orders. Actions (any case):
+      - "lock": hold the order so it CANNOT be picked or despatched (padlock in
+        the UI; it stays in the open-orders queue). Use this to hold an order,
+        e.g. while a cancellation request is confirmed.
+      - "unlock": release a held order.
+      - "paid" / "unpaid": set the payment status (Orders/ChangeStatus 1 / 0).
 
-    Supported actions (case-insensitive):
-      - "lock"   → hold the order so it CANNOT be picked/dispatched (Orders/LockOrder)
-      - "unlock" → release a held order back into normal processing
-      - "paid"   → mark the order PAID   (Orders/ChangeStatus, status 1)
-      - "unpaid" → mark the order UNPAID (Orders/ChangeStatus, status 0)
+    ⚠️ LOCKING RELEASES THE ORDER'S ALLOCATED STOCK, so it can be sold on other
+    orders while this one is held. Parking would keep it allocated, but "park"
+    and "unpark" aren't available through the API and are refused with a pointer
+    to "lock".
 
-    The primary use case is HOLDING an order before it dispatches — e.g. a
-    customer has requested cancellation in Shopify and you want to stop the
-    pickwave until a human confirms. Use "lock" for that; a locked order stays
-    in the open-orders queue but is barred from processing (padlock in the UI).
+    ⚠️ A lock can't be read back (the API has no lock field): the result is the
+    write response, and you should check the padlock in the UI. Paid/unpaid are
+    read back.
 
-    ⚠️ Stock allocation side effect: LOCKING an order RELEASES the stock it had
-    allocated back to available — so that stock can be re-allocated to (and sold
-    on) other orders while this one is held. PARKING would KEEP the stock
-    allocated, but parking is not reachable via the API (below). If you hold an
-    order you intend to keep, be aware its stock is no longer ring-fenced.
+    ⚠️ Whether marking an EXISTING order unpaid PARKS it (taking it out of the
+    dispatch queue) has not been observed. An order created unpaid is parked, but
+    that is a different code path. The unpaid manifest states the prediction and
+    its basis, and the live read-back reports `is_parked`, warning if it differs.
 
-    ⚠️ "park"/"unpark" are NOT supported — Linnworks exposes no public endpoint
-    for parking (it exists only as a RulesEngine action; GeneralInfo.IsParked is
-    read-only via the API). Requesting them returns an error suggesting "lock".
-    Note parking is also the only state that KEEPS stock allocated (see above),
-    so this API gap has a real operational cost, not just a naming one.
-
-    ⚠️ Lock read-back limitation: the Linnworks API exposes no lock-status field
-    on the order model, so this tool CANNOT verify a lock/unlock landed by
-    reading it back — it reports the API's write response and asks you to confirm
-    the padlock in the Linnworks UI. Paid/unpaid ARE read-back verified against
-    GeneralInfo.Status.
-
-    ⚠️ Does marking an EXISTING order unpaid PARK it? NOT YET OBSERVED. An
-    order CREATED unpaid is force-parked by Linnworks (proven live), but that
-    is a different code path from Orders/ChangeStatus(0) on
-    an order that already exists, and nobody has watched this one. A parked
-    order is OUT of the dispatch queue, so this matters more than the action's
-    name suggests. The unpaid dry-run manifest says what is predicted and on
-    what basis (UNPAID_FLIP_PARKS_ORDER, which ships unset), and the live
-    read-back reports the flag rather than assuming it.
-
-    Read-before-write: every order is resolved and its current status, parked
-    flag, processed flag, customer and reference captured into a manifest. An
-    order id that can't be resolved becomes a resolve_error row and never aborts
-    the batch. Bulk-capable: all resolvable orders are changed in a single API
-    call (both endpoints take an id list). Staging threshold 25 (reversible).
-    dry_run defaults to True.
+    Every order is resolved first and its status, parked and processed flags,
+    customer and reference go into the manifest. An unresolvable id becomes a
+    `resolve_errors` row and never aborts the batch. All resolved orders change in
+    one API call. Batches over 25 stage.
 
     Args:
-        order_ids: One or more order identifiers. Each may be a GUID pkOrderID
-            or a numeric order number (e.g. "100234"); both are accepted and a
-            single string is also accepted for convenience.
-        action: One of "lock", "unlock", "paid", "unpaid".
-        confirmed_count: For batches above the staging threshold, echo back the
-            exact order count to execute (see the write-safety framework).
-        dry_run: If True (default), returns the manifest without changing
-            anything. Set to False to execute.
+        order_ids: GUIDs or numeric order numbers (a single string is accepted).
+        action: "lock", "unlock", "paid" or "unpaid".
+        confirmed_count: For batches over 25, echo the exact order count.
+        dry_run: Default True: returns the manifest and changes nothing.
 
     Returns:
-        A dict with dry_run, action, endpoint, order_count, resolved_count,
-        the per-order manifest (dry run) or per-order read-back results (live),
-        resolve_errors for any unresolved ids, and rate_limited for any id the
-        API throttled while resolving.
-
-        On a live paid/unpaid run each result row carries status_after,
-        status_after_label, changed, and — since v1.63.0 — parked_before,
-        is_parked and parked_changed, plus a warning if the observed parked
-        flag contradicts the manifest's prediction. A row whose read-back was
-        throttled is marked readback="rate_limited": the write HAD already been
-        sent, so treat it as unconfirmed rather than failed and check the order
-        in the Linnworks UI rather than re-running this tool.
+        dry_run, action, endpoint, order_count, resolved_count, the manifest (dry
+        run) or per-order results (live), resolve_errors, and rate_limited.
+        A live paid/unpaid row carries status_after, status_after_label, changed,
+        parked_before, is_parked, parked_changed, and a warning if parking
+        contradicts the prediction. readback="rate_limited" means the write WAS
+        sent: treat it as unconfirmed, check the UI, and don't re-run.
     """
     action_norm = (action or "").strip().lower()
 
@@ -5677,74 +5410,43 @@ def refund_order_lines(
     dry_run: bool = True,
 ) -> dict:
     """
-    Issue a partial refund for specific line items on a processed Linnworks order.
+    Partially refund specific lines on a processed order. Call get_order first
+    for each line's `row_id`, then pass only the lines to refund.
 
-    Each entry in `lines` must include `row_id` (the OrderItemRowId from get_order's
-    items list). Optionally supply `amount` to override the full line cost, or
-    `quantity` when the refund is part of a return.
+    ⚠️ Refunds move real customer money. dry_run defaults to True.
 
-    ⚠️ If you pass `quantity` WITHOUT an explicit `amount`, and that quantity
-    does not match the line's own total quantity, this tool REFUSES the call
-    rather than silently defaulting `amount` to the whole line's cost —
-    passing quantity=1 against a 3-unit line with no amount would otherwise
-    refund the money for all 3 units while only crediting 1 back to stock.
-    Pass an explicit `amount` for that line to proceed.
+    ⚠️ Passing `quantity` without an `amount` is REFUSED when that quantity isn't
+    the line's full quantity, because the amount would otherwise default to the
+    whole line (quantity=1 on a 3-unit line would refund all 3). Pass an explicit
+    `amount` for a part-quantity refund.
 
-    Use get_order() first to see the order's items including their `row_id` values,
-    then call this tool with only the lines you want to refund.
+    PROVEN LIVE: creating the refund (CreateRefund), the eligibility gate, and the
+    read-back. The channel push (ActionRefund) is proven live on Shopify for a
+    full refund. NOT PROVEN: ActionRefund for a partial refund like this one, the
+    postage component, or any Amazon or eBay order, where a push has been accepted
+    before without reaching the channel. A live response that pushes to an
+    unproven channel carries `channel_push_warning`.
 
-    PROVEN LIVE (18 Sep 2026, the post-merge verification):
-    ReturnsRefunds/CreateRefund creates a real refund header for a partial,
-    per-line refund, and the header is then visible via
-    GetRefundHeadersByOrderId — the same read-back this tool now performs
-    after every live refund. The eligibility gate (_check_refund_eligibility)
-    has also been proven, both refusing and permitting correctly against
-    real order data.
-
-    NOT PROVEN: ReturnsRefunds/ActionRefund — the call that pushes a refund
-    to the sales channel — has never been shown to actually reach a channel.
-    It cannot be proven on a throwaway order (a manually created DIRECT order
-    has no channel to push to); the only proof is refunding a genuine
-    Shopify/Amazon/eBay order and watching that channel's own admin. Every
-    live response that attempts a channel push (push_to_channel=True) carries
-    this warning under "channel_push_warning" — see REFUND_CHANNEL_PUSH_WARNING,
-    the single place this text is written.
-
-    IMPORTANT: dry_run defaults to True. Refunds move real customer money.
+    After a live refund the order's refund headers are re-read. `outcome` is
+    "confirmed", "unconfirmed" (no matching header yet; NEVER re-run the refund
+    on this, it risks paying twice), "read_back_failed" or "rate_limited".
 
     Args:
-        order_id: Order to partially refund. Accepts GUID or numeric order number.
-        lines: List of dicts, each with:
-            - row_id (str, required): OrderItemRowId from get_order items.
-            - amount (float, optional): Amount to refund for this line. Defaults
-              to the full cost_inc_tax of the matched item.
-            - quantity (int, optional): Quantity being refunded. If supplied
-              without an explicit amount, and it does not equal the line's
-              own quantity, the call is refused (see the warning above).
-        refund_postage: If True, also refund the postage/shipping cost.
-        note: Optional note/reason to include with the refund.
-        push_to_channel: If True (default), submits the refund to the sales
-            channel. If False, records in Linnworks only.
-        dry_run: If True (default), shows what would be refunded without doing it.
+        order_id: GUID or numeric order number.
+        lines: List of dicts with row_id (required, from get_order), amount
+            (optional; defaults to the line's full cost_inc_tax) and quantity
+            (optional; see the warning above).
+        refund_postage: Also refund the postage.
+        note: Optional reason for the refund.
+        push_to_channel: Default True: submit the refund to the sales channel.
+            False records it in Linnworks only.
+        dry_run: Default True: shows the refund without making it.
 
     Returns:
-        A dict with the refund summary and, if live:
-          - refund_header_id, refund_reference, status: from CreateRefund.
-          - actioned: True/False from ActionRefund's SuccessfullyActioned —
-            keeps its existing name, type and meaning unchanged.
-          - actioned_with_errors: True when actioned is True but ActionRefund
-            also returned a non-empty Errors array — a contradiction
-            Linnworks itself does not reconcile. Carries its own warning.
-          - channel_push_warning: present whenever a channel push was
-            attempted (push_to_channel=True and a refund was created) and
-            REFUND_CHANNEL_PUSH_PROVEN is False.
-          - outcome: "confirmed" (the refund header is visible on a fresh
-            read-back), "unconfirmed" (the read-back succeeded but no
-            matching header was found yet — see unconfirmed_message; NEVER
-            re-run the refund on this outcome), "read_back_failed" (the
-            read-back call itself failed), or "rate_limited" (a
-            RateLimitError was raised during the read-back — distinct from
-            every other outcome).
+        The refund summary, and on a live run: refund_header_id,
+        refund_reference, status, actioned (ActionRefund's SuccessfullyActioned),
+        actioned_with_errors (actioned but Linnworks also returned errors),
+        channel_push_warning, outcome and unconfirmed_message.
     """
     try:
         guid, raw = _resolve_order_guid(order_id)
@@ -6214,70 +5916,57 @@ def get_stock_change_history(
     max_pages: int = 10,
 ) -> dict:
     """
-    Stock movement history for one or more SKUs, plus a derived dead-stock summary
-    answering "when did this item actually go out of stock?".
-
-    This is the audit trail behind a stock level — every change with its date,
+    Stock movement history for one or more SKUs, plus a summary answering "when
+    did this item actually go out of stock?". Each movement has its date,
     quantity, resulting level and source (sale, PO delivery, return, stocktake,
-    manual adjustment, file import, FBA sync). Built for the catalogue-cleanup
-    screen: find items that have sat at zero for ~3 months, then hand them to
-    find_composite_parents → delist_all_channel_listings → archive_inventory_items.
+    adjustment, file import, FBA sync). Use it to age zero-stock items before
+    retiring them: an item at zero for two days is not dead stock.
 
-    KEY DERIVED FIELD — `out_of_stock_since` is the date the item TRANSITIONED to
-    zero: the oldest row in the current unbroken run of level_after == 0. It is
-    deliberately NOT "the most recent row where level == 0", because an item that
-    has been dead for a year still receives automated rows (FBA sync, nightly file
-    imports) that rewrite 0 — which would reset the dead-stock clock to today on
-    exactly the items you are hunting. `days_out_of_stock` follows from it.
+    `out_of_stock_since` is the date the item went TO zero: the oldest row in the
+    current unbroken run at zero, not the latest zero row (automated rows keep
+    rewriting 0 on long-dead items, which would reset the clock to today).
+    `days_out_of_stock` follows from it.
 
-    ⚠️  PER LOCATION, NOT COMBINED. Linnworks requires a locationId here (the
-    spec's "if null then combined" is wrong — it 400s), so history is always
-    location-scoped. `all_locations=True` scans every location and returns a
+    ⚠️ PER LOCATION. Linnworks needs a location for history, so there is no
+    combined figure. all_locations=True scans every location and returns a
     per-location breakdown plus `zero_at_all_locations_since` (the LATEST of the
-    per-location zero dates, set only when every location is currently zero).
-    Quantities are NOT summed across locations: in accounts where non-Default
-    locations are virtual dropship supplier mirrors showing the same availability,
-    a combined figure would be meaningless.
+    per-location zero dates, set only when every location is at zero). Quantities
+    are never summed across locations, because supplier-mirror locations can show
+    the same stock twice.
 
-    ⚠️  change_source is DERIVED from the free-text note, not returned by Linnworks
-    — the API has no ChangeSource field even though the underlying table does. The
-    raw `note` is always included so you can reclassify anything landing in "OTHER".
+    ⚠️ change_source is DERIVED from the free-text note (Linnworks returns no such
+    field). The raw `note` is always included; reclassify anything in "OTHER".
 
-    Filtering (`change_sources` / `exclude_change_sources`) applies to the returned
-    `movements` list and to `last_real_movement_date`. It never applies to the
-    level series behind `out_of_stock_since`, because automated rows here are real
-    decrements (FBA sync live-observed walking an item 13 → 0) and dropping them
-    would produce a wrong date.
+    Filters apply to `movements` and `last_real_movement_date` only, never to the
+    level series behind `out_of_stock_since`: automated rows can be real
+    decrements, and dropping them would give a wrong date.
 
-    Cost: one call per (SKU, location) page. `all_locations=True` costs one call
-    per location per SKU — keep those batches small. Rate limit 250/min.
+    Cost: one call per (SKU, location) page; all_locations=True costs one call per
+    location for each SKU, so keep those batches small.
 
     Args:
-        skus: One SKU or a list of SKUs (exact ItemNumbers; ACTIVE items only —
-            archived SKUs cannot be resolved).
-        location_id: StockLocationId GUID to scope to. Defaults to the "Default"
-            location (owned stock). Ignored when all_locations=True.
-        all_locations: If True, scan every stock location and return a per-location
-            breakdown plus zero_at_all_locations_since. Costs ~29 calls per SKU.
-        include_movements: If True (default), return the movement rows. Set False
-            for a summary-only bulk screen.
-        max_movements: Cap on returned movement rows per SKU/location (default 50).
-            Truncates detail only — every summary figure is computed across all
-            rows read.
-        change_sources: Only include movements with these sources. One or more of:
-            SALE, RETURN, PO_DELIVERY, PO_BOOKING, PO_DELETED, PO_UPDATE,
-            STOCKTAKE, ADJUSTMENT, FBA_SYNC, FILE_IMPORT, SCRAP, OTHER.
-        exclude_change_sources: Drop movements with these sources. Applied after
-            change_sources.
-        max_pages: Max history pages (200 rows each) to read per SKU/location.
-            Default 10 (2,000 rows). If the trailing zero run reaches the end of a
-            truncated read, out_of_stock_since_is_lower_bound is set True.
+        skus: One SKU or a list (exact, ACTIVE items only; archived SKUs can't be
+            resolved).
+        location_id: Location GUID. Defaults to Default. Ignored with
+            all_locations.
+        all_locations: Scan every location (see above).
+        include_movements: Default True. False for a summary-only screen.
+        max_movements: Cap on returned rows per SKU/location (default 50). The
+            summary still covers every row read.
+        change_sources: Keep only these sources: SALE, RETURN, PO_DELIVERY,
+            PO_BOOKING, PO_DELETED, PO_UPDATE, STOCKTAKE, ADJUSTMENT, FBA_SYNC,
+            FILE_IMPORT, SCRAP, OTHER.
+        exclude_change_sources: Drop these sources (applied after change_sources).
+        max_pages: History pages (200 rows each) per SKU/location, default 10. If
+            the zero run reaches the end of a cut-off read,
+            `out_of_stock_since_is_lower_bound` is True.
 
     Returns:
-        dict with per-SKU results carrying the summary fields (out_of_stock_since,
-        days_out_of_stock, last_sale_date, last_received_date, …), optional
-        movements, and — with all_locations — a `locations` breakdown. Unresolvable
-        SKUs land in `unresolved` and never abort the batch.
+        Per-SKU results with out_of_stock_since, days_out_of_stock,
+        last_movement_date, last_real_movement_date, last_sale_date,
+        last_received_date, optional movements, and with all_locations a
+        `locations` breakdown. Unresolvable SKUs go to `unresolved`; throttled
+        ones to `rate_limited`, with `complete: false`.
     """
     if isinstance(skus, str):
         skus = [skus]
@@ -6838,130 +6527,64 @@ def find_unlinked_order_lines(
     only_problems: bool = True,
 ) -> dict:
     """
-    Scan orders and classify every line as linked, unlinked, unknown, or
-    not_expected, based on whether it still carries the channel-identity
-    fields (ItemNumber / ItemSource / ChannelSKU) a channel-downloaded line
-    normally has.
+    Scan orders and classify every line as linked, unlinked, unknown or
+    not_expected, by whether it still carries the channel-identity fields
+    (ItemNumber, ItemSource, ChannelSKU) that a channel-downloaded line normally
+    has. A channel order line without them can't be fulfilled on the storefront
+    when the order is despatched.
 
-    This is a REPORT, not a fix. Nothing in this tool writes to an order, and
-    finding an unlinked line here does not mean a repair is available —
-    especially not for an order that has already despatched: this repo has
-    confirmed that Orders/UpdateOrderItem exists (it takes a full OrderItem
-    object, including ItemNumber/ItemSource) but has deliberately never fired
-    a request against it that could change a real order, so whether it can
-    actually set or restore those fields is unconfirmed either way. This tool also does not assert how Linnworks internally matches a
-    despatch back to its storefront line — only that these fields are what
-    the order-detail endpoints return for a line, and that a line missing
-    them looks structurally identical to the ones the reporter flagged.
+    This is a REPORT, not a fix: it writes nothing. To repair a line on an open
+    order use relink_order_line; a line on an order already despatched can't be
+    repaired. This tool does not assert how Linnworks internally matches a
+    despatch to its storefront line; it reports the fields. It also can't see a
+    link that points at the WRONG storefront line: a line reads as linked whenever
+    ItemSource is non-blank.
 
-    Scans open (currently unprocessed) orders, a processed-order date range,
-    or both — set at least one of `include_open=True` or a `from_date`/
-    `to_date` pair. Every order, whichever list it came from, is read the
-    same way (Orders/GetOrdersById), so composite children are always walked
-    under the same nesting key regardless of whether the order is open or
-    already processed.
+    Scope: open orders (include_open), a processed-order date range (from_date
+    and to_date), or both. Every order is read with Orders/GetOrdersById.
 
-    A line is classified `not_expected` — and excluded from the `unlinked`
-    count — when it was never expected to carry its own channel reference:
-    a composite child, or any line on an order whose own Source is not a
-    channel download (e.g. a manually created "DIRECT" order), or a line
-    whose SKU is an internal marker/service SKU (Check-notes, APPLYGRIP,
-    royal-mail-placement, ...) that has no storefront counterpart by design
-    (reason `internal_sku`). Without this bucket, `unlinked` would be swamped
-    by lines that were never broken.
+    Statuses:
+      - linked: the line carries its channel reference.
+      - unlinked: a channel order line whose channel reference is blank — the
+        fault this looks for.
+      - not_expected (not counted as unlinked): a composite child, a line on a
+        non-channel order (e.g. "DIRECT"), or an internal marker/service SKU
+        (Check-notes, APPLYGRIP, royal-mail-placement, …; reason `internal_sku`).
+        internal_sku only applies where the line would otherwise be unlinked, and
+        it is decided by SKU alone, so it is coarse: a marker SKU that is also
+        sold as a product has its genuine orphans hidden too. Every such line is
+        counted in `internal_sku_suppressed`.
+      - unknown (not counted as unlinked): the API never returned the fields at
+        all, so a scan never reports "0 unlinked" on fields it didn't see.
 
-    `internal_sku` only ever applies where a line would otherwise be
-    `unlinked`: a composite child or manual-order line keeps its own reason,
-    a line that does carry a channel reference stays `linked`, and a line
-    whose fields are absent stays `unknown`. It is decided by SKU alone, so
-    it is coarse — a SKU used as a marker that is also sold as a product
-    has its genuine orphaned sales suppressed along with the marker uses.
-    Every suppressed line is counted in `internal_sku_suppressed`, so a scan
-    never hides findings without saying how many.
+    A line deliberately added in Linnworks after the order downloaded also reads
+    as unlinked. A timing rule on AddedDate/IsUnlinked was investigated and not built: on those fields a deliberate add and a genuine
+    orphan cannot be told apart. The raw added_date and is_unlinked are returned by
+    get_processed_order_items for manual review; this tool ignores them.
 
-    NO TIMING-BASED CLASSIFICATION EXISTS. A line added directly
-    in Linnworks after an order downloads still classifies as `unlinked` when it looks orphaned, exactly like a
-    genuinely broken line — the SKU-list suppression above cannot catch it,
-    because it is a real product, not a marker SKU. Building a rule on
-    AddedDate/IsUnlinked was investigated first: a read-only probe compared
-    a deliberate Linnworks add against a confirmed genuine orphan and a
-    normal fully-linked channel order. Both
-    the deliberate add and the confirmed orphan show the identical pattern —
-    AddedDate far later than the rest of the order's lines, close to the
-    order's processing time — and IsUnlinked read False on every example,
-    including the confirmed orphan. On these fields, a deliberate add and a
-    re-added orphan cannot be told apart, so the timing-based classification was not built. The raw `added_date` (AddedDate) and
-    `is_unlinked` (IsUnlinked) fields are exposed on every line returned by
-    `get_processed_order_items` (via _flatten_order_item, and every other
-    caller of it) for manual review, but this tool's own classification
-    ignores them entirely.
-
-    A line is classified `unknown` — also excluded from `unlinked` — only
-    when the raw order data never carried the identity fields at all (as
-    opposed to carrying them blank). A scan should never report "0 unlinked"
-    on the strength of fields it never actually got to look at.
-
-    A rate-limited order batch is excluded from every count and reported
-    separately under `rate_limited_orders`, with `complete` set to False —
-    never folded into `unknown` or silently dropped, so a throttled run can
-    never read as a clean "0 unlinked found".
-
-    Separately, an order can be requested from Orders/GetOrdersById (as part
-    of an unthrottled batch) and simply not come back in its response — no
-    error, just absent. That order is reported under `missing_orders`
-    (matched case-insensitively against what was returned, with the entry
-    itself keeping the exact GUID it was requested with) and also sets
-    `complete` to False. This has never been observed live;
-    the bucket exists so a scan can never silently under-report its own
-    coverage by counting a dropped order as scanned.
+    Coverage is reported, not assumed: orders throttled by the rate limit go to
+    `rate_limited_orders`, orders GetOrdersById didn't return go to
+    `missing_orders`, and either sets `complete` to False. Retry those before
+    trusting a clean result.
 
     Args:
-        include_open: Include currently open (unprocessed) orders. Default True.
-        from_date: Start of a processed-order date range, ISO format
-            (e.g. "2026-05-01"). Required together with to_date to include
-            processed orders in the scan.
-        to_date: End of the processed-order date range, ISO format.
-        date_field: Which processed-order date to filter on when a date range
-            is given — "received", "processed" (default), "payment", or
-            "cancelled".
+        include_open: Include open (unprocessed) orders. Default True.
+        from_date: Start of a processed-order date range, ISO (e.g. "2026-05-01").
+            Needs to_date too.
+        to_date: End of the processed-order date range, ISO.
+        date_field: Processed-order date to filter on: "received", "processed"
+            (default), "payment" or "cancelled".
         location_id: Location to scan for open orders. Defaults to "Default".
-        only_problems: When True (default), the `orders` list only includes
-            orders that contain at least one `unlinked` or `unknown` line —
-            the top-level `counts` still cover every line scanned either way.
-            Set False to get a full per-order, per-line dump of the entire
-            scan.
+        only_problems: Default True: `orders` lists only orders with an unlinked
+            or unknown line. `counts` always cover every line scanned.
 
     Returns:
-        A dict with:
-          - include_open, from_date, to_date, date_field, only_problems: the
-            query parameters used
-          - order_count_scanned: orders actually read and classified. This is
-            NOT the number of GUIDs requested — an order that was
-            rate-limited, or that GetOrdersById simply never returned, is not
-            counted here, and a duplicate order returned twice in one
-            response is only counted once
-          - counts: {linked, unlinked, unknown, not_expected} totals across
-            every line in every classified order
-          - internal_sku_suppressed: how many of the not_expected lines are
-            there only because their SKU is an internal marker/service SKU
-            (reason `internal_sku`) — lines that would otherwise have been
-            counted unlinked. Reported separately because only_problems can
-            drop such an order from `orders` entirely
-          - orders: per-order rows (order_id, num_order_id, reference_num,
-            source, processed, lines), each line row carrying sku, title,
-            channel_line_id, channel_line_source, channel_sku,
-            is_composite_child, status, reason
-          - rate_limited_orders: orders whose detail fetch was throttled and
-            so were never classified — retry these
-          - missing_orders: orders that were requested from GetOrdersById (on
-            an unthrottled batch) but never came back in its response — same
-            shape as rate_limited_orders (order_id plus whatever list
-            metadata is already held for it). Distinct from
-            rate_limited_orders: the two buckets never share an order
-          - complete: orders read and classified means orders read and
-            classified — this is False when ANYTHING was throttled OR did
-            not come back, whether that shows up in rate_limited_orders or
-            in missing_orders
+        A dict with the query parameters; order_count_scanned (orders actually
+        read and classified, not GUIDs requested); counts {linked, unlinked,
+        unknown, not_expected}; internal_sku_suppressed; orders (order_id,
+        num_order_id, reference_num, source, processed, lines with sku, title,
+        channel_line_id, channel_line_source, channel_sku, is_composite_child,
+        status, reason); rate_limited_orders; missing_orders; complete.
     """
     if not include_open and not (from_date and to_date):
         raise ValueError(
@@ -7194,74 +6817,38 @@ def get_pick_waves(
     detail_level: str | None = None,
 ) -> dict:
     """
-    List Linnworks pickwaves (Picking/GetAllPickingWaveHeaders).
+    List pickwaves (Picking/GetAllPickingWaveHeaders). Read-only, and a
+    point-in-time snapshot: orders leave waves and states move on while pickers
+    work.
 
-    Read-only. This is a point-in-time snapshot — orders leave waves and wave
-    state advances while pickers work, so a wave's order count and state are
-    only guaranteed accurate at the moment of this call, and this tool cannot
-    add an order to an existing wave (no such endpoint exists — see below).
+    ⚠️ Omitting `state` does NOT return all states, whatever the Linnworks docs
+    say: it returned 0 waves where state="Shipped" returned thousands. Pass a
+    state explicitly; there is no single call for "everything".
 
-    ⚠️  Omitting `state` does NOT return "all states" despite what the
-    Linnworks API itself documents. Live-confirmed during this build: the
-    same location returns 0 rows with no state filter, and 3,281 rows with
-    state="Shipped". Always pass an explicit state to see historical
-    (Abandoned / Shipped) waves; there is no way to get "everything,
-    including history" in one call.
+    `detail_level` doesn't change which waves come back or their fields here,
+    only their order.
 
-    `state` genuinely filters the result set (live-confirmed: state=Abandoned
-    -> 238 waves, state=Shipped -> 3,281 waves, on the same account). `detail_level`
-    ("All" vs "OnlyPickWave") did not change the result set on this endpoint
-    during live testing — identical wave counts and the same fields at both
-    levels — so it is not a way to get more or less detail here. It is not
-    wholly inert: the row ORDER differed between the two levels, so the two
-    responses are not byte-identical and neither level guarantees a stable
-    ordering. It is exposed because it is a real, documented API parameter.
+    Linnworks exposes no endpoint for adding an order to an existing pickwave.
+    To change membership, use remove_orders_from_pick_waves or create new waves
+    with generate_pick_waves. Use get_pick_wave_detail for a wave's orders and
+    items, which these header rows don't carry.
 
-    Linnworks exposes no endpoint for adding an order to an existing pickwave
-    — confirmed by inspecting the live Picking API spec during this build.
-    UpdatePickingWaveHeader can only change UserId/State/StartTime/EndTime on
-    a wave that already exists; GeneratePickingWave has no field to target an
-    existing wave, so it only ever creates new ones. The only routes that
-    touch wave membership at all are removing orders
-    (remove_orders_from_pick_waves) or regenerating the wave
-    (generate_pick_waves) — see those tools, and get_pick_wave_detail for the
-    live order/item detail this tool's own header rows don't carry.
-
-    This tool never computes or returns a summed weight or volume for a wave.
-    The underlying payload carries no such field, and even if it did,
-    composite parents carry zero weight by design (their components are what
-    is actually picked), so a wave containing a bundle would silently read as
-    lighter than it really is — exactly the wrong direction for planning a
-    trolley's capacity.
+    No weight or volume total is returned (the payload has none, and bundle
+    parents weigh zero, so a sum would understate a trolley's load).
 
     Args:
-        state: Filter to one pickwave state — "Unallocated", "Allocated",
-            "InProgress", "Paused", "Complete", "Abandoned", "Packing", or
-            "Shipped". Omit to use whatever the API's own (documented but
-            live-disproven) default is — see the warning above.
-        location_id: Filter to one Linnworks location GUID. Defaults to
-            DEFAULT_LOCATION_ID only when no other filter is supplied at all
-            (the API 400s on a completely empty request).
-        detail_level: "All" or "OnlyPickWave". Does not change which waves
-            come back or what fields each carries on this endpoint; only the
-            row order differed between levels — see above.
+        state: "Unallocated", "Allocated", "InProgress", "Paused", "Complete",
+            "Abandoned", "Packing" or "Shipped".
+        location_id: Location GUID. Defaults to Default only when no other
+            filter is given (the API rejects an empty request).
+        detail_level: "All" or "OnlyPickWave".
 
     Returns:
-        A dict with:
-          - state_filter, location_id_filter, detail_level_filter: the
-            filters actually sent
-          - state_filter_note: the "omitted state != all states" warning,
-            always present
-          - count: number of waves returned
-          - waves: list of formatted wave rows (see _format_pick_wave) —
-            each carries `state` (raw, verbatim) and `state_label` (only
-            populated for a state value confirmed live against a real wave;
-            otherwise an explicit "unknown (unconfirmed raw state: ...)"
-            marker — never a guessed name, never null)
-          - rate_limited: True if the call was throttled after Linnworks'
-            full retry ladder (never reported as "0 waves found")
-          - error: present only when rate_limited is True
-          - complete: False only when rate_limited is True
+        state_filter, location_id_filter, detail_level_filter, state_filter_note,
+        count, waves (each with `state` verbatim and `state_label`, which is an
+        explicit "unknown (unconfirmed raw state: ...)" marker for any state not
+        yet confirmed on a real wave), and on throttling: rate_limited, error and
+        complete=False (never reported as "0 waves").
     """
     params = _pick_wave_query_params(state, location_id, detail_level)
 
@@ -11686,76 +11273,39 @@ def create_or_update_inventory_item(
     dry_run: bool = True,
 ) -> dict:
     """
-    Create or update inventory items in Linnworks (upsert by SKU).
+    Create or update inventory items, matched by SKU: an existing SKU is updated,
+    a new one is created. On update only the fields you pass change; the rest of
+    the record is read first and carried through, because Linnworks clears any
+    field left out of an update.
 
-    Each item is looked up by its SKU.  If the SKU already exists the item is
-    updated (UpdateInventoryItem); if it does not exist it is created
-    (AddInventoryItem).  Only the fields you supply are changed on updates —
-    but because the Linnworks UpdateInventoryItem endpoint requires a full
-    payload, all existing field values are read first and merged with your
-    changes so that unsupplied fields are preserved.
+    Category: Linnworks keys the category on its GUID and ignores a name sent on
+    its own. category_name (case-insensitive) or category_id is resolved against
+    Inventory/GetCategories, and both are sent. The category must already exist
+    (see get_categories). An unknown one is a per-item error: `category_error` in
+    the manifest, and that item is skipped on a live run while the rest proceed.
 
-    For batches larger than 50 items this tool enters a staging mode: it returns
-    a manifest preview and asks you to confirm with confirmed_count=<N> before
-    executing.  This prevents accidental large-scale inventory changes.
+    Every live write is read back. `category_verified` (True/False, None if the
+    read-back was rate-limited) is the field to trust: a 2xx alone has not proved
+    a category landed. Mismatches are counted in `category_mismatches` with a
+    `warning`. `category_name` in the read-back comes from the GetCategories list
+    (Linnworks returns it null) and stays null if nothing in the batch named a
+    category.
+
+    Batches over 50 items stage: confirm with confirmed_count=<N>.
 
     Args:
-        items: List of dicts.  Required key: "sku".  Optional keys:
-            - title (str):          ItemTitle
-            - barcode (str):        BarcodeNumber
-            - retail_price (float): RetailPrice
-            - purchase_price (float): PurchasePrice
-            - tax_rate (float):     TaxRate (e.g. 20.0 for 20%)
-            - category_name (str):  Category by name — resolved to its CategoryId
-                                    via Inventory/GetCategories (case-insensitive;
-                                    must already exist, see get_categories).
-                                    Linnworks keys the category on the GUID and
-                                    ignores a bare name, so both are sent.
-            - category_id (str):    CategoryId GUID — alternative to category_name
-                                    (validated against GetCategories; if both are
-                                    given they must agree).
-            - weight (float):       Weight in kg
-            - height (float):       Height in cm
-            - width (float):        Width in cm
-            - depth (float):        Depth in cm
-            - metadata (str):       MetaData free-text field
-            - barcode (str):        BarcodeNumber
-        confirmed_count: For batches > 50 items, pass len(items) here after
-            reviewing the manifest to confirm the write.
-        dry_run: If True (default), returns the manifest without writing.
-            Set to False to execute.
-
-    An unknown category_name / category_id is a per-item error: it appears as
-    `category_error` in the manifest and, on a live run, that item is skipped
-    (action "error") without any write — the rest of the batch still proceeds.
-
-    Every live write is followed by a fresh GetInventoryItem read-back. Each
-    result row reports the `category_id` / `category_name` Linnworks now holds
-    and, when a category was requested, `category_verified` (True/False; None
-    if the read-back was rate-limited). A False is counted in the top-level
-    `category_mismatches` and carries a `warning` — a 2xx alone never proves
-    the category landed (that is how the 14 Sep 2026 silent no-op happened).
-    GetInventoryItem returns a null CategoryName, so `category_name` is filled
-    from the GetCategories list fetched to resolve the batch; if nothing in the
-    batch named a category it stays null (no extra call). `category_verified`
-    is computed on the GUID and is the field to trust.
+        items: List of dicts. Required: "sku". Optional: title, barcode,
+            retail_price, purchase_price, tax_rate (e.g. 20.0), category_name,
+            category_id (GUID; must agree with category_name if both given),
+            weight (kg), height, width, depth (cm), metadata.
+        confirmed_count: For batches over 50, pass len(items).
+        dry_run: Default True: returns the manifest and writes nothing.
 
     Returns:
-        A dict with:
-          - dry_run:      whether this was a dry run
-          - item_count:   number of items in the batch
-          - manifest:     per-item preview (always present) — includes the
-                          resolved category_id, or category_error
-          - category_errors: items whose category could not be resolved
-          - results:      per-item outcome (live run only), each with the
-                          read-back category_id / category_name /
-                          category_verified / readback
-          - created:      count of newly created items (live run only)
-          - updated:      count of updated items (live run only)
-          - errors:       count of failed items (live run only)
-          - category_mismatches: items whose requested category did not land
-                          on read-back (live run only); a top-level `warning`
-                          accompanies any non-zero count
+        dry_run, item_count, manifest (per item, with the resolved category_id or
+        category_error), category_errors; and on a live run: results (with the
+        read-back category_id, category_name, category_verified, readback),
+        created, updated, errors, category_mismatches and warning.
     """
     for entry in items:
         _check_injection("title",     entry.get("title", ""))
@@ -12445,68 +11995,36 @@ def delete_extended_properties(
     dry_run: bool = True,
 ) -> dict:
     """
-    Delete extended-property rows from Linnworks inventory items — the missing
-    delete counterpart to set_extended_properties, which is upsert-only and has
-    no way to remove a property once it exists.
+    Delete extended-property rows from inventory items: the delete counterpart to
+    set_extended_properties, which can only add or update.
 
-    Each row is matched by (sku, property_name); the match is EXACT and
-    CASE-SENSITIVE, the same semantics set_extended_properties already uses —
-    a differently-cased name will not match and is reported unresolved rather
-    than silently removing the wrong row.
+    Rows are matched by (sku, property_name), EXACT and CASE-SENSITIVE; a name in
+    a different case doesn't match and is reported, never guessed. Pass
+    `expected_value` to delete only if the current value matches; otherwise the
+    row is BLOCKED. If an item has several rows with the same name, ALL of them
+    are deleted, and the manifest lists every row_id.
 
-    Optionally pass expected_value to guard against removing a value you
-    didn't expect to see: if the current value on Linnworks doesn't match,
-    the row is BLOCKED (not deleted) rather than treated as "not found".
+    ⚠️ IRREVERSIBLE. To restore a row, set it again with set_extended_properties
+    using the value shown in the manifest. Staging counts the ROWS to be deleted
+    after matching, not the input entries: over 10 needs confirmed_count=<that
+    number>.
 
-    If an item carries more than one property row sharing the same name,
-    ALL matching rows are included in the manifest and deleted — the manifest
-    shows every row_id so you can see exactly what will be removed.
-
-    IRREVERSIBLE — once a row is deleted, restoring it means calling
-    set_extended_properties again with the value you saw in the manifest.
-    Batches where more than 10 property rows would actually be deleted
-    require confirmed_count=<that number> (the staging count is the number
-    of rows queued for deletion after resolving/matching, not the number of
-    input entries — a batch of 5 input entries that expands to 60 matching
-    rows on a duplicate-name item stages at 60, not 5).
-
-    Read-before-write: every SKU is resolved and the item's CURRENT properties
-    are read first, so the manifest shows the row's real current value and
-    row_id before anything is touched. After a live delete, each affected
-    item's properties are re-read with a FRESH call (never the pre-write
-    cache) and every deleted row_id is classified into `deleted` or
-    `still_present` — a 204 response alone is never reported as success.
-
-    A RateLimitError while resolving a SKU or reading an item's properties is
-    NOT the same as "property not found" — it is bucketed separately under
-    `rate_limited` and the response is marked `complete: False`, rather than
-    silently mislabelling a quota failure as a missing property.
+    The current properties are read first, so the manifest shows real values and
+    row ids. After a live delete they are re-read fresh, and every row id is
+    reported as `deleted` or `still_present`. A rate limit is reported under
+    `rate_limited` with `complete: False`, never as "not found".
 
     Args:
-        properties: List of dicts, each with:
-            - sku (str):            Item SKU  [required]
-            - property_name (str):  Exact, case-sensitive property name  [required]
-            - expected_value (str): Optional guard — if supplied and it doesn't
-                                    match the property's current value, the row
-                                    is blocked rather than deleted.
-        confirmed_count: For batches where more than 10 rows would actually be
-            deleted, pass that resolved count here (see IRREVERSIBLE note above).
-        dry_run: If True (default), returns the manifest without deleting.
-            Set to False to execute.
+        properties: List of dicts with sku and property_name (both required) and
+            an optional expected_value.
+        confirmed_count: When over 10 rows would be deleted, that resolved count.
+        dry_run: Default True: returns the manifest and deletes nothing.
 
     Returns:
-        A dict with:
-          - dry_run:         whether this was a dry run
-          - item_count:      number of input property entries
-          - to_delete_count: number of property ROWS that would be/were deleted
-          - manifest:        per-row preview — sku, stock_item_id, property_name,
-                             expected_value, current_value, row_id, status
-                             ("resolved"/"unresolved"), action
-                             ("delete"/"blocked"/None), reason (when not deleting)
-          - rate_limited:    rows skipped due to a quota failure, not a genuine miss
-          - complete:        False if any row was skipped due to rate limiting
-          - deleted:         row_ids confirmed gone by the read-back (live run only)
-          - still_present:   row_ids the read-back still finds (live run only)
+        dry_run, item_count, to_delete_count, manifest (sku, stock_item_id,
+        property_name, expected_value, current_value, row_id, status, action,
+        reason), rate_limited, complete; and on a live run: deleted and
+        still_present.
     """
     for p in properties:
         _check_injection("property_name", p.get("property_name", ""))
@@ -15486,71 +15004,49 @@ def delete_dangling_glt_template(
     dry_run: bool = True,
 ) -> dict:
     """
-    ⚠️  PROVISIONAL AND EXPERIMENTAL. Delete ONE named GLT template while leaving
-    its siblings alone — for retiring an orphan whose listing is already gone,
-    without touching the live listing beside it.
+    ⚠️ PROVISIONAL AND EXPERIMENTAL. Delete ONE named GLT template whose listing
+    is already gone, leaving the live listing beside it alone. It exists to answer
+    a question on one SKU, not for cleanup at scale; run it on ONE low-value SKU,
+    record the result, and never batch it.
 
-    ⚠️  THIS TOOL EXISTS TO ANSWER A QUESTION, NOT TO CLEAN UP AT SCALE, AND TWO
-    OF ITS THREE PLAUSIBLE OUTCOMES END WITH IT BEING REMOVED FROM THIS SERVER.
+    Two open questions, in order:
+      A. Does Delete land at all on a template reading "Not deleted"? Unknown:
+         that status means Linnworks already tried and failed, and re-firing
+         Delete on such templates has returned success while changing nothing.
+      B. If it lands, does it take the ITEM's channel-SKU rows, and so the LIVE
+         sibling's mapping, with it? Those rows belong to the item, not the
+         template. If so, the sibling listing stays up but silently loses stock
+         and price sync.
 
-    Two questions, in sequence:
-      A. Does ProcessTemplates Delete land AT ALL on a template reading
-         `Not deleted`? Unknown. That status means Linnworks already tried to
-         remove the listing and it did not happen, so such a template has
-         arguably already resisted deletion once — and re-firing Delete on one
-         "returned a clean 2xx and changed nothing" (6 Aug 2026).
-      B. If it lands, does it take the ITEM's channel-SKU rows with it, and so
-         the LIVE sibling's Linnworks mapping? Channel-SKU rows belong to the
-         item, not the template, and the read-back records that "the first
-         successful delete empties that table for the whole item". If that
-         happens the sibling listing stays up but loses stock and price sync,
-         and NOTHING flags it.
+    Refused, with no write, in this order:
+      template_not_on_item          the id isn't a template of this SKU here
+      dangling_not_proven           the status isn't exactly "Not deleted"
+      variation_child_live_siblings the group's template serves live (or
+                                    unverifiable, see `unknown_siblings`) members
+      no_sibling_use_unpublish      only one template: use unpublish_channel_listing
+      before_snapshot_incomplete    the before-write read left out an affected
+                                    item entirely, which would disable the
+                                    mapping-lost check
 
-    B is reachable only if A is yes, which is the less likely branch. Run this
-    on ONE low-value SKU, read the result, and record it — do not batch it.
-
-    Gates (each refuses and sends no write), evaluated in this order — safety
-    before scope, so a variation child is never misdirected to a tool that
-    refuses its exact shape:
-      template_not_on_item          — id is not a template of this SKU on this store
-      dangling_not_proven           — status is not exactly "Not deleted"
-      variation_child_live_siblings — the group's template serves live (or
-                                       unverifiable — see `unknown_siblings`)
-                                       members
-      no_sibling_use_unpublish      — only one template; use unpublish_channel_listing
-
-    A further safety check, evaluated after the four gates above (not
-    renumbered into them — it is evidentiary, not a scope/safety gate on the
-    target itself): before_snapshot_incomplete — a stock item this delete
-    could affect (the named SKU, or the variation parent the template lives
-    on) was OMITTED from the before-write channel-SKU read entirely, not
-    just returned empty. An omission is indistinguishable from "confirmed
-    zero rows" by count alone, and a confirmed zero is exempt from the
-    mapping-lost check — so an omission here would silently disable the
-    very check this tool exists to run. Refuses before any write is sent.
-
-    On a live run `out["outcome"]` is one of: orphan_removed_siblings_intact,
-    orphan_removed_sibling_mapping_lost, orphan_removed_sibling_template_lost
-    (a sibling TEMPLATE — not just its rows — is gone from the read-back;
-    worse than mapping_lost and reported separately), delete_refused_by_linnworks,
-    unconfirmed (the write's or the read-back's outcome could not be
-    confirmed — treat as "may have happened").
+    Live outcome: orphan_removed_siblings_intact,
+    orphan_removed_sibling_mapping_lost (failure: restore the mapping in the UI),
+    orphan_removed_sibling_template_lost (worse: a sibling's template is gone),
+    delete_refused_by_linnworks, or unconfirmed (treat as "may have happened").
 
     Args:
-        sku:                   ONE SKU. No lists — the signature is the safety limit.
-        template_id:           ONE template id, which must belong to that SKU here.
-        sub_source:            Store/account, e.g. "My Shopify Store".
-        channel:               "Shopify" (default), "Amazon", "TikTok", …
-        allow_unproven_delete: Bypass the dangling gate. Fires a delete at a
-                               template NOT proven dead, on an item with a live
-                               sibling — the exact risk this tool guards. Recorded
-                               in the response as a warning.
-        confirmed_count:       Echo back 1 to execute a live run.
-        dry_run:               True (default) plans and proves, and writes nothing.
+        sku: ONE SKU. No lists, by design.
+        template_id: ONE template id, belonging to that SKU on this store.
+        sub_source: The store or account.
+        channel: "Shopify" (default), "Amazon", "TikTok", …
+        allow_unproven_delete: Skip the "Not deleted" check and delete a template
+            not proven dead, on an item with a live sibling, which is the exact
+            risk this tool guards against. Recorded as a warning.
+        confirmed_count: Echo back 1 to execute a live run (always staged).
+        dry_run: Default True: plans and checks, writes nothing.
 
     Returns:
-        plan (target + siblings_untouched), before/after snapshots, outcome,
-        and on a refusal: success=False with blocked_reason.
+        plan (target and siblings_untouched), before/after snapshots, outcome; on
+        a refusal, success=False with blocked_reason.
     """
     _check_injection("sku", sku or "")
     target = _resolve_glt_target(channel, sub_source)
@@ -16666,98 +16162,58 @@ def list_to_shopify(
     dry_run: bool = True,
 ) -> dict:
     """
-    List EXISTING Linnworks inventory items to Shopify via the Generic Listing
-    Tool (GLT) — the API equivalent of the UI flow "select items → apply
-    configurator → create listings". Shopify only (v1).
+    List EXISTING Linnworks items on Shopify through the Generic Listing Tool:
+    the API version of "select items → apply configurator → create listings".
+    Shopify only.
 
-    Per-item configurator selection is data-driven, so a mixed batch auto-routes
-    each product to the right listing recipe:
-      1. `configurator` override (if given) — forces this configurator for ALL skus
-      2. else the item's "Shopify Configurator" extended property value
-      3. else `default_configurator` (the batch fallback)
-    The chosen name is validated against the live Shopify configurator catalogue
-    (GenericListings/GetConfiguratorsInfoPaged). A name that doesn't match a real
-    configurator becomes a per-item error row in `unresolved` — reported, not
-    fatal — so one typo or one unfilled property never sinks the whole batch.
+    The configurator is chosen per item: `configurator` (forces one for every
+    SKU), else the item's "Shopify Configurator" extended property, else
+    `default_configurator`. The name must match a real configurator; a typo, a
+    blank property or a name shared by several stores (pass `sub_source`) becomes
+    a row in `unresolved` and never sinks the batch.
 
-    The same configurator name can exist on more than one Shopify store (e.g. a
-    configurator on both "Store A" and "Store B"). A name that
-    matches configurators on multiple stores is ambiguous and is reported as such;
-    pass `sub_source` (e.g. "My Shopify Store") to scope the batch to one store.
+    ⚠️ A live run creates REAL customer-facing Shopify listings that are not
+    trivially undone. Always dry-run first and start small. Creates are
+    ASYNCHRONOUS: templates sit at "Creating" for several minutes, so an accepted
+    call means queued, not listed.
 
-    Flow per configurator group (live run only):
-      GenericListings/CreateTemplates  → returns the created template ids
-      GenericListings/ProcessTemplates → pushes those templates live to Shopify
-    Items are grouped by their resolved configurator so each group is one
-    CreateTemplates + one ProcessTemplates call.
+    ⚠️ Two duplicate checks, both excluding items from the push:
+      1. `already_listed`: this item is already live on the target store.
+      2. `possible_duplicates`: a DIFFERENT SKU with the same title (normalised,
+         exact match) is already live there — the case of one product carried
+         under two SKU schemes. The titles compared are the batch's own
+         already-listed rows, so pass the whole category, or supply
+         `known_listed_titles` when the batch holds only the new SKUs. Set
+         allow_duplicate_titles=True to list them anyway.
 
-    ⚠️  A live run (dry_run=False) creates REAL Shopify listings — customer-facing
-    and not trivially undone. Always run dry_run=True first and read the plan.
-    The read/selection path (configurator catalogue, SKU + extended-property
-    resolution) is live-confirmed, and the write path (CreateTemplates /
-    ProcessTemplates) was live-run on 6 Aug 2026 — a bulk category run that
-    created 265 real listings. Creates are ASYNCHRONOUS: templates
-    sit at Status "Creating" and drain over several minutes, so an accepted call
-    means queued, not listed. Start small.
-
-    For batches larger than 25 SKUs this tool stages: it returns the plan and asks
-    you to confirm with confirmed_count=<N> before executing.
+    Each configurator group is one CreateTemplates call plus one ProcessTemplates
+    call. Batches over 25 SKUs stage: confirm with confirmed_count=<N>.
 
     Args:
-        skus: Exact SKUs / ItemNumbers to list. Each is resolved to its
-            StockItemId and its "Shopify Configurator" extended property is read.
-        configurator: Optional override — force this configurator name for every
-            SKU, ignoring per-item extended properties.
-        default_configurator: Optional fallback configurator name for any item
-            whose "Shopify Configurator" property is blank (only consulted when
-            `configurator` is not given).
-        sub_source: Optional Shopify store name to scope to (e.g. "My Shopify Store",
-            "My Second Store"). Disambiguates configurator names shared across
-            stores and restricts which configurators count as valid.
-        confirmed_count: For batches > 25 SKUs, pass len(skus) after reviewing
-            the plan to confirm the write.
-        dry_run: If True (default), returns the plan without creating any listing.
-            Set to False to create and push the Shopify listings.
+        skus: Exact SKUs to list.
+        configurator: Force this configurator name for every SKU.
+        default_configurator: Fallback for items with no "Shopify Configurator"
+            property (used only when `configurator` isn't given).
+        sub_source: Shopify store name to scope to; also resolves configurator
+            names shared across stores.
+        allow_duplicate_titles: List title-matched items anyway (they are still
+            reported). Default False.
+        known_listed_titles: Extra titles known to be live on the target store.
+        confirmed_count: For batches over 25, pass len(skus) after reviewing the
+            plan.
+        dry_run: Default True: returns the plan and creates nothing.
 
     Returns:
-        A dict with:
-          - dry_run, item_count
-          - configurator_catalogue_count: configurators available for matching
-          - available_sub_sources: Shopify store names present in the catalogue
-          - plan: per-SKU resolution for items that resolved cleanly (sku,
-            stock_item_id, title, configurator, configurator_id, channel_id,
-            sub_source, decision)
-          - groups: items grouped by resolved configurator — what each
-            CreateTemplates call would cover
-          - already_listed: SKUs whose OWN item is already live on the target
-            store (item-level dedupe) — excluded from CreateTemplates
-          - possible_duplicates: SKUs whose TITLE matches a product already live
-            on the target store under a DIFFERENT SKU (product-level dedupe) — excluded unless allow_duplicate_titles=True
-          - unresolved: per-SKU error rows (not found / no configurator decided /
-            name not in catalogue / ambiguous across stores)
-          - results: per-group outcome with created template ids and process
-            status (live run only)
-
-    ⚠️  TWO dedupe layers, because one wasn't enough:
-      1. ITEM-level — is THIS StockItemId already listed on the target store?
-      2. PRODUCT-level — is a DIFFERENT SKU with the same title already live?
-
-    Layer 2 exists because layer 1 worked perfectly and still produced 177
-    duplicate Shopify products on 6 Aug 2026: a category carried the same products
-    under an old word-suffix SKU scheme and a new code scheme, so the new SKUs
-    were genuinely unlisted while the products were already for sale. Titles are
-    compared normalised (lowercase, whitespace collapsed) and matched exactly.
-
-    The comparison set is the batch's own `already_listed` rows — free, and the
-    right answer when you pass a whole category. If your batch contains ONLY the
-    new SKUs, pass `known_listed_titles` (e.g. titles from `list_inventory_items`
-    for that category) or layer 2 has nothing to compare against.
-
-    Args (beyond the selection args above):
-        allow_duplicate_titles: If True, title-matched items are listed anyway
-            and merely reported. Default False (they are excluded).
-        known_listed_titles: Extra titles known to be live on the target store,
-            for when the batch doesn't itself contain the already-listed SKUs.
+        A dict with dry_run, item_count, configurator_catalogue_count,
+        available_sub_sources;
+        plan: per-SKU (sku, stock_item_id, title, configurator, configurator_id,
+            channel_id, sub_source, decision);
+        groups: items grouped by configurator;
+        already_listed; possible_duplicates (duplicate_of_skus, matched_on,
+            listed_anyway);
+        unresolved: per-SKU reasons;
+        results: per-group created template ids and process status (live run
+            only).
     """
     if not skus:
         raise ValueError("skus must contain at least one SKU.")
@@ -17282,204 +16738,97 @@ def refresh_channel_listing(
     dry_run: bool = True,
 ) -> dict:
     """
-    Re-push / revise EXISTING listings on any GLT-managed channel so updated
-    item data — extended properties, title, price, description, etc. —
-    propagates to the live channel. Shopify (default), Amazon, TikTok (also
-    Magento/Walmart where a tenant lists through the GLT).
+    Re-push EXISTING listings on a GLT channel so edited item data (title, price,
+    description, extended properties) reaches the live listing. Channels: Shopify
+    (default), Amazon, TikTok, Magento, Walmart. A non-GLT channel (eBay, Etsy,
+    Mirakl, CDiscount) raises a ValueError naming the supported ones. It never
+    creates a listing: a SKU not already live on `sub_source` goes to `unresolved`
+    (use list_to_shopify to create one).
 
-    Generalised beyond Shopify by reusing the channel registry and
-    target resolver already live-proven for `unpublish_channel_listing`: channel identity comes from `GLT_CHANNELS` / `_resolve_glt_target`,
-    never from a hard-coded string, so a non-GLT channel (eBay, Etsy, Mirakl,
-    CDiscount) raises a clear ValueError naming the channels that ARE supported
-    instead of silently doing nothing.
+    ⚠️ Proven on Shopify only. On Amazon the push has been fired live and changed
+    nothing observable; on TikTok it has never been tried. Every row carries
+    `revise_proven` and `push_observed_state`, and every message warns about an
+    unproven channel.
 
-    ⚠️  `ProcessTemplates` Revise/Update is live-proven on SHOPIFY only
-    (v1.27.1, 14 Jul 2026). On AMAZON it has been FIRED LIVE TWICE and
-    PRODUCED NO OBSERVABLE CHANGE on either listing (24-25 Aug 2026, on
-    two listings) — tried and shown ineffective, not merely
-    untried (see `GLT_CHANNELS["amazon"]["push_observed_state"]`). On TIKTOK it
-    has never been attempted live at all — only the Delete action has been
-    fired live there (`unpublish_channel_listing`). Each plan row and the
-    response carry `revise_proven` (proof) and the registry also carries
-    `push_observed_state` — "proven", "never_attempted" or
-    "accepted_but_not_processed", the same vocabulary `EBAY_CHANNELS` uses —
-    so an unproven channel is warned about in every message, worded from the
-    registry's own evidence text depending on which state it's in. See
-    `channel` below for what the eventual single-listing live proof needs to
-    check.
+    ⚠️ STALE SNAPSHOT: the push sends the template's STORED field snapshot, not the
+    item's current data. An old template overwrites live values with old ones (one
+    once reverted a live selling price). "Revise" and "Update" behave the same. No
+    API refreshes a variation template's fields; opening the listing in the
+    Linnworks GLT UI rebuilds them. Only live-run templates you know are fresh.
 
-    This is the revise counterpart to `list_to_shopify`: that tool CREATES new
-    listings; this one REVISES listings that already exist. It never creates a
-    listing — if a SKU isn't already live on the target store it's reported in
-    `unresolved` (use `list_to_shopify` to create it).
+    ⚠️ SILENT NO-OP: `processed: true` means the push was ACCEPTED, never that
+    anything changed. A push can leave the channel untouched (e.g. when the stored
+    image URL no longer exists). Read the listing back after every live run, using
+    listing data (get_channel_listings or the channel's reporting), not the
+    channel's detail page, which on Amazon can lag a day.
 
-    Flow per SKU (read-before-write):
-      1. Resolve SKU → StockItemId + title.
-      2. Confirm the item has a channel-SKU mapping for this channel's Source on
-         `sub_source` (the channel-SKU link table — see get_channel_listings).
-         Not listed → unresolved.
-      3. GenericListings/OpenTemplatesByInventory → open the item's EXISTING GLT
-         template(s) for that store/account (this OPENS existing templates, it
-         does NOT create any — so it can't duplicate the listing). An item can
-         have SEVERAL templates on one channel (live-observed on Amazon: a
-         merchant and an ".FBA" template on one StockItemId) — ALL of them are
-         planned and pushed, one plan row each, because reviving only one would
-         leave the other stale.
-      4. (live run) GenericListings/ProcessTemplates with the revise action, per
-         template → pushes the current item data to the live listing.
+    Per SKU: resolve it → confirm a channel-SKU mapping on `sub_source` → open the
+    item's existing template(s) with OpenTemplatesByInventory (this never creates
+    one) → on a live run, ProcessTemplates per template. An item can have several
+    templates on one channel (Amazon merchant + ".FBA"); all are planned, one row
+    each, because reviving only one leaves the other stale.
 
-    Variation groups: GLT variation listings hang off the variation
-    PARENT — the parent holds the template (and usually no channel-SKU row),
-    the children hold the channel-SKU mappings (and no templates). Both
-    directions are handled automatically:
-      - Passing CHILD SKUs: a child with no template of its own falls back to
-        its variation parent's template (`via_variation_parent: true` in the
-        plan). Several children of one group dedupe to ONE parent-template push
-        (`covers_skus` lists the inputs it covers). Revising the parent
-        template pushes ALL variants of the multi-variant Shopify product.
-      - Passing the PARENT SKU: it counts as listed when any of its children is
-        mapped on the store (`listed_via_children` in the plan).
-    This is how a Shopify "Compare at price" (compare_at_price, mapped from the
-    `special_price` extended property) is pushed for variant listings: update
-    `special_price` on the children, then refresh — the parent-template revise
-    carries the new compare-at to the live listing.
+    Variation groups: on Shopify the PARENT holds the template and the children hold
+    the channel-SKU rows. A child with no template falls back to its parent's
+    (`via_variation_parent`); children of one group dedupe to ONE push that revises
+    every variant (`covers_skus`); a parent counts as listed when any child is
+    mapped (`listed_via_children`). This is how a Shopify compare-at price (mapped
+    from the `special_price` extended property) reaches variant listings: update
+    `special_price` on the children, then refresh. On Amazon one family (bushings)
+    had a template per child, TikTok's shape — one observation, not a rule — so
+    treat any Amazon variation result as unverified.
 
-    Action selection (per template, data-driven):
-      - action=None (default, "auto"): use the template's own
-        `NextSuggestedAction` when GLT marks it allowed, otherwise fall back to
-        "Revise".
-      - action="Revise"/"Update"/"Relist"/…: force that GLT action for every item.
-    Templates GLT marks as locked, or where neither the suggested action nor
-    Revise is allowed, are reported in `unresolved` rather than force-pushed.
-    ⚠️ `NextSuggestedAction` is NOT evidence that a change is pending: it read
-    "Update", allowed, on 24/24 sampled listed Shopify templates (19 Aug 2026),
-    including ones whose snapshots were seven weeks old. For a listed Shopify
-    template it is effectively a constant — use `staleness` below, not this.
+    Action: action=None uses the template's NextSuggestedAction when GLT allows it,
+    else "Revise"; pass action="Revise"/"Update"/… to force one. Locked templates,
+    or ones with no allowed action, go to `unresolved`. NextSuggestedAction is NOT a
+    sign that a change is pending (it reads "Update" on almost every listed Shopify
+    template); use `staleness` for that.
 
-    ⚠️  A live run (dry_run=False) changes REAL customer-facing listings.
-    Acceptance of the push is NOT proof of a change (see below) — read the
-    listing data back (e.g. get_channel_listings), not the channel's own detail
-    page: Amazon detail pages in particular can lag the catalogue by up to a day,
-    so a green result plus an unchanged detail page proves nothing either way.
-
-    ⚠️⚠️  A PUSH CAN BE A SILENT NO-OP (live-proven 18 Aug 2026).
-    ProcessTemplates returns an empty 2xx whether it changed the listing or not,
-    so `processed: true` means the push was ACCEPTED — never that anything moved.
-    Two BLT templates pushed "successfully" and left Shopify byte-for-byte
-    unchanged, because the template's stored image URL pointed at a Linnworks
-    image that had since been deleted. The no-op read as "fixed" and the wrong
-    image stayed live.
-    → `check_staleness=True` (default) now compares the template's STORED
-      snapshot against the item's CURRENT values before pushing and reports
-      `staleness` per plan row. ⚠️ It is a PARTIAL check by necessity: the
-      template exposes real values only for Title, Price and
-      LastModificationTime — Images/Attributes/MetaFields/Description come back
-      as counts or the literal "Filled". So `comparable_fields_match: true` means
-      "no difference I can SEE", NOT "this push will change something". The 
-      no-op had title, price AND image count all matching. There is deliberately
-      no `will_change` field, and no post-push read-back: `LastUpdateTime`
-      advances on every push (it advanced on the proven no-op), so nothing the
-      API returns can confirm the channel actually changed. Read the storefront.
-
-    ⚠️⚠️  STALE-SNAPSHOT HAZARD (live-proven 14 Jul 2026): ProcessTemplates
-    Update pushes the template's STORED field snapshot, NOT the item's current
-    data. A template whose fields were last built months ago (see
-    `LastModificationTime` on the open template) will push those old values —
-    a live run on one template overwrote the current £89.95 selling price with
-    the template's stale £79.95 and left the stale compare-at in place, and
-    the storefront had to be repaired. GLT's `NextSuggestedAction: "Update"`
-    does NOT mean the template body is fresh, and `action="Revise"` behaves
-    IDENTICALLY to "Update" (both push the stored snapshot — live-proven).
-    No public API refreshes a variation template's fields: only
-    live-run a template you know is fresh (the UI listing screen rebuilds
-    fields on open; the API path does not), and read the live listing back
-    immediately after every push.
-
-    For batches larger than 25 SKUs this tool stages: it returns the plan and asks
-    you to confirm with confirmed_count=<N> before executing.
+    Batches over 25 SKUs stage: the plan comes back first, and you confirm with
+    confirmed_count=<N>.
 
     Args:
-        skus: Exact SKUs / ItemNumbers whose listings to refresh.
-        sub_source: Store / account / region name, scoping both the "is it
-            listed?" check and which template(s) are opened/revised. Shopify:
-            the store (the default store, or another store name). Amazon:
-            the account ("My Amazon Account") or a regional sub-source
-            ("My Amazon Account - Germany"), which resolves to the account's
-            ChannelId (`sub_source_resolution: "account-prefix"` in the
-            response). TikTok: "MY_TIKTOK_SHOP".
-        channel: GLT channel — "Shopify" (default), "Amazon", "TikTok",
-            "Magento", "Walmart". A non-GLT channel (eBay, Etsy, Mirakl,
-            CDiscount) raises a ValueError naming the supported channels.
-            ⚠️ ONE Amazon variation family has been observed live (bushings, 25 Aug 2026): every child SKU resolved its OWN template
-            directly (TikTok's shape, not Shopify's) — the child→parent
-            fallback never fired. That is one observation, not a rule — other
-            Amazon variation families may still hang off the parent, the same
-            as Shopify. The child→parent fallback described above
-            runs unchanged regardless of channel, so on an unobserved Amazon
-            variation SKU it could still open the correct parent template, the
-            wrong one, or none at all. Treat any Amazon variation result as
-            unverified until more families are observed.
-        action: Optional GLT action override (e.g. "Revise", "Update"). Default
-            None = auto (use the template's NextSuggestedAction, else "Revise").
-        check_staleness: If True (default), compare each template's stored
-            snapshot against the item's current title / price / image count
-            before pushing (3 extra GETs per template) and report `staleness`
-            on every plan row. The title/price comparison uses the override row
-            for THIS channel (e.g. an Amazon title override), not Shopify's, so
-            it doesn't misfire on exactly the channel-specific content this
-            covers. Set False to skip the extra reads — the plan then says
-            nothing about whether the snapshot is fresh.
-        check_listing_exists: If True (default, SHOPIFY only), verify that each
-            template's stored ActiveListingId is still a product that EXISTS on
-            the channel — one cheap Shopify `nodes(ids:)` call per 100 templates,
-            and it needs the same Shopify Admin credentials as
-            `repair_channel_listing_images` (without them the check is reported
-            as not run, never as passed). This is a DIFFERENT question from
-            staleness: staleness asks whether the snapshot's content drifted,
-            this asks whether the listing it points at is still there at all. A
-            template left pointing at a deleted listing (a duplicate cleanup on
-            the channel does exactly this) is invisible to the
-            channel-SKU table, which can be healthy and re-pointed at the
-            surviving product at the same time. Such rows are moved to
-            `unresolved` with blocked_reason "dangling_listing" and EXCLUDED
-            from the push, because Linnworks batches listing ids into one
-            `nodes(ids:)` call and throws on the null slot — so pushing one
-            dangling template fails every healthy template batched with it.
-        confirmed_count: For batches > 25 SKUs, pass len(skus) after reviewing
-            the plan to confirm the write.
-        dry_run: If True (default), returns the plan without pushing anything.
-            Set to False to push the revisions to the channel. A dry run makes
-            no ProcessTemplates call for any channel.
+        skus: Exact SKUs whose listings to refresh.
+        sub_source: Store or account that the listing check and templates are
+            scoped to. Shopify: the store name. Amazon: the account, or a regional
+            sub-source ("<account> - Germany"), which resolves to the account
+            (`sub_source_resolution: "account-prefix"`). TikTok: the shop name.
+        channel: "Shopify" (default), "Amazon", "TikTok", "Magento" or "Walmart".
+        action: Optional GLT action override. Default None = auto (see above).
+        check_staleness: Default True. Compares each template's stored snapshot
+            with the item's current title, price and image count (3 extra GETs per
+            template; title and price use THIS channel's override). It is PARTIAL:
+            image URLs, description, attributes and metafields can't be compared,
+            so `comparable_fields_match: true` means "no difference visible", not
+            "this push will change something". Price is skipped on variation
+            templates. False skips the reads and says nothing about freshness.
+        check_listing_exists: Default True, Shopify only. Checks each template's
+            stored listing id still exists on Shopify (needs Shopify Admin
+            credentials; without them it reports the check as not run, never as
+            passed). A template pointing at a deleted listing goes to `unresolved`
+            with blocked_reason "dangling_listing" and is NOT pushed, because one
+            dangling template makes Linnworks fail every template batched with it.
+        confirmed_count: For batches over 25, pass len(skus) after reviewing the
+            plan.
+        dry_run: Default True: returns the plan and pushes nothing.
 
     Returns:
-        A dict with:
-          - dry_run, item_count, target_channel, target_source,
-            target_sub_source, target_channel_id, sub_source_resolution,
-            revise_proven, available_sub_sources
-          - plan: one row PER TEMPLATE that would be revised (sku, covers_skus,
-            stock_item_id, title, channel, sub_source, template_id,
-            configurator_id, active_listing_id, status, action,
-            next_suggested_action, is_allowed_to_revise, templates_on_item,
-            revise_proven; plus via_variation_parent / listed_via_children where
-            a variation group was resolved). Deduped by template id: inputs
-            sharing one template = one row, but an item with several templates
-            on one channel (e.g. Amazon merchant + FBA) produces one row PER
-            template. Each row also carries `staleness` (when check_staleness):
-            template_last_modified, snapshot_age_days, compared{title,price,
-            image_count}, stale_fields[], comparable_fields_match,
-            skipped_comparisons[], undetectable_fields[], warning.
-          - stale_plan_count / no_detectable_change_count /
-            staleness_unchecked_count / staleness_note
-          - unresolved: per-SKU error rows (not found / not listed on the store /
-            no template / locked / no allowed revise action)
-          - results: per-template push outcome (live run only)
-
-        The single-listing live proof this needs before `revise_proven` on a
-        channel can be flipped to True (see the note in GLT_CHANNELS): pick ONE low-risk listing on that channel, check its
-        template's freshness first (LastModificationTime / `staleness` here),
-        push it, then read the listing DATA back (get_channel_listings or the
-        channel's own reporting) — never the detail page — to confirm the
-        change actually landed before trusting the flag.
+        A dict with dry_run, item_count, target_channel, target_source,
+        target_sub_source, target_channel_id, sub_source_resolution, revise_proven,
+        available_sub_sources;
+        plan: one row per template (sku, covers_skus, stock_item_id, title,
+            channel, sub_source, template_id, configurator_id, active_listing_id,
+            status, action, next_suggested_action, is_allowed_to_revise,
+            templates_on_item, revise_proven, via_variation_parent /
+            listed_via_children, listing_exists, listing_check, and `staleness`:
+            template_last_modified, snapshot_age_days, compared, stale_fields,
+            comparable_fields_match, skipped_comparisons, undetectable_fields,
+            warning);
+        stale_plan_count, no_detectable_change_count, staleness_unchecked_count,
+        staleness_note; listing_existence_checked, dangling_listing_count,
+        dangling_listings;
+        unresolved: per-SKU rows with the reason;
+        results: per-template push outcome (live run only).
     """
     if not skus:
         raise ValueError("skus must contain at least one SKU.")
@@ -17988,124 +17337,84 @@ def unpublish_channel_listing(
     dry_run: bool = True,
 ) -> dict:
     """
-    Take an EXISTING channel listing DOWN — unpublish/retire the listing so it
-    stops selling. Works on any GLT-managed channel: Shopify, Amazon, TikTok
-    (also Magento/Walmart where a tenant lists through the GLT).
+    Take EXISTING channel listings down so they stop selling, using the GLT
+    "Delete" action on the item's existing template(s). Channels: Shopify
+    (default), Amazon, TikTok, Magento, Walmart. Use it to retire a duplicate or
+    orphaned listing, or as the take-down step of a dead-product cleanup (delist →
+    wait for channel sync → archive).
 
-    This is the destructive counterpart to `list_to_shopify` (which CREATES
-    listings) and `refresh_channel_listing` (which REVISES them). It ends the
-    live listing via the GLT "Delete" action against the item's existing
-    template. Use it to retire an orphaned/duplicate listing — e.g. after a
-    SKU-scheme migration leaves a stale Linnworks item still live at a frozen
-    quantity, silently able to oversell — or as the take-down step of a
-    dead-product cleanup (delist → wait for channel sync → archive).
+    ⚠️ DESTRUCTIVE and customer-facing: a live run ends a REAL listing, and its
+    reviews, ranking and URL can't be recovered. Check the plan targets the
+    listing you mean to retire, not the one you want to keep (compare
+    channel_reference_id).
 
-    ⚠️  DESTRUCTIVE and customer-facing. A live run removes a REAL listing (with
-    its reviews, ranking and URL). Point it only at the orphan you mean to
-    retire — NOT the good listing you want to keep. Re-listing later is possible,
-    but the original listing's channel history (reviews / SEO) is not recoverable.
+    Delete is live-proven on SHOPIFY, AMAZON and TIKTOK, on one listing each.
+    Neither NextSuggestedAction "NotAllowed" nor Status "Errors while updating"
+    blocks it. MAGENTO and WALMART are unproven; every row carries
+    `delete_proven`.
 
-    ✅  `ProcessTemplates` Delete is LIVE-PROVEN on SHOPIFY (v1.25.0, 8 Jul
-    2026), AMAZON (v1.32.0, 5 Aug 2026) and TIKTOK (v1.42.0,
-    7 Aug 2026), each on one listing. Each proof was checked on three surfaces: the
-    channel-SKU row gone, the template gone, other channels and stock untouched.
-    On Amazon the Delete worked even though the template read
-    `NextSuggestedAction: "NotAllowed"`; on TikTok it worked on a template at
-    `Status: "Errors while updating"`. Neither field gates a Delete. MAGENTO and
-    WALMART are NOT proven: no account tested has configurators on either.
-    Each plan row carries `delete_proven`, read from `GLT_CHANNELS`, so an
-    unproven channel is never silently assumed.
+    eBay, Etsy, Mirakl and CDiscount have no GLT templates, so a listing there has
+    to be ended in the channel's own admin; passing them raises a ValueError.
 
-    ⚠️  eBay, Etsy, Mirakl and CDiscount are NOT GLT channels — they have no
-    templates, so this tool cannot END a listing on any of them; that must be
-    done in the channel's own admin. Passing them raises a ValueError. (eBay
-    DOES have its own separate, non-GLT route for REVISING a listing's
-    description — see `revise_ebay_listing_description` — but that
-    is not this tool and does not change what's said here.)
+    An item can have several templates on one channel (Amazon merchant + ".FBA");
+    all are planned, one row each, because deleting one leaves the other live.
 
-    VARIATION GROUPS. A variation CHILD holds the channel-SKU rows
-    but no template of its own — the template lives on the variation PARENT and
-    serves EVERY variant of the listing. So a dead size/colour can only be
-    retired by deleting the parent's template, which also ends its siblings.
-    That is done here ONLY when it costs nothing: when every other member of the
-    group is either already un-listed on this store, or is itself being retired
-    in the same operation (`skus` + `also_retiring_skus`). Otherwise the SKU is
-    blocked with `blocked_reason="variation_child_live_siblings"`, naming the
-    parent and the live siblings, so the reason is actionable instead of opaque.
-    "Live" means "still has a channel-SKU row on this store" — NOT "has stock":
-    a sibling listed at zero stock is still a customer-facing listing nobody
-    asked to remove. Passing a PARENT SKU directly is an explicit instruction to
-    retire the whole group and IS allowed, with the affected children named in
-    the plan row.
+    Variation groups: on Shopify the PARENT holds the template, which serves every
+    variant, and the children hold only the channel-SKU rows. A child is retired
+    through the parent's template ONLY when no other member would lose a listing:
+    every other member is already unlisted on this store, or is in `skus` or
+    `also_retiring_skus`. Otherwise it is blocked as
+    `variation_child_live_siblings`, naming the parent and the live siblings.
+    "Live" means it has a channel-SKU row on this store, not that it has stock.
+    Passing the PARENT SKU retires the whole group, with the children named in the
+    plan. A child that holds its own template (usual on TikTok) is retired on its
+    own.
 
-    Flow per SKU (read-before-write):
-      1. Resolve SKU → StockItemId + title.
-      2. Confirm the item has a channel-SKU mapping for this channel's Source on
-         `sub_source` (see get_channel_listings), and capture its current
-         channel_reference_id + listed_quantity for the manifest. A variation
-         PARENT counts as listed when any of its children is mapped. Not listed
-         on that store/account → unresolved.
-      3. GenericListings/OpenTemplatesByInventory → open the item's EXISTING GLT
-         template(s) (OPENS existing templates — it does NOT create any). An item
-         can have SEVERAL templates on one channel (live-observed on Amazon: a
-         merchant and an ".FBA" template on one item) — ALL of them are planned,
-         because deleting one would leave the other live. Locked → unresolved.
-         No template of its own → the variation-parent fallback above.
-      4. (live run) GenericListings/ProcessTemplates with Action="Delete" per
-         template → ends the live listing.
-      5. (live run) Verify on TWO surfaces: re-open each template by id to prove
-         it is gone, AND re-read the channel-SKU rows of every item whose listing
-         this template served (the children, for a parent take-down).
+    After a live run each template is re-opened to confirm it is gone, and the
+    channel-SKU rows of every item it served are re-read. Each result's `outcome`
+    is taken_down, listing_gone_template_orphaned, delete_failed (nothing removed;
+    the listing may still be selling), template_deleted_listing_row_remains
+    (usually channel-sync lag) or unconfirmed (the read-back failed;
+    `taken_down` is None, never True).
 
-    Staging: the threshold is 10 (the tightest tier, shared with
-    delete_inventory_item). For batches > 10 SKUs this returns the plan + manifest
-    and asks you to confirm with confirmed_count=<N> before executing.
+    Batches over 10 SKUs stage: the plan comes back first, and you confirm with
+    confirmed_count=<N>.
 
     Args:
-        skus: Exact SKUs / ItemNumbers whose listings to take down.
-        sub_source: Store / account / region name, scoping both the "is it
-            listed?" check and which listing is deleted. Shopify: the store
-            (the default store, or another store name). Amazon: the account
-            ("My Amazon Account") or a regional sub-source
-            ("My Amazon Account - Germany"), which resolves to the account's
-            ChannelId. TikTok: "MY_TIKTOK_SHOP".
-        channel: GLT channel — "Shopify" (default), "Amazon", "TikTok",
-            "Magento", "Walmart".
-        allow_variation_parent_takedown: If True (default), a variation child may
-            be retired via its parent's template when — and only when — no other
-            group member would lose a listing (see above). Set False to refuse
-            every parent-level take-down; children are then blocked with
-            `variation_child_parent_takedown_disabled` rather than silently
-            mislabelled.
-        also_retiring_skus: Extra SKUs known to be going away in this same
-            operation. They are treated as already-retired when judging whether a
-            variation parent is safe to take down — needed when a group is split
-            across chunks, or when a caller delegates one SKU at a time (as
-            delist_all_channel_listings does). They are NOT themselves delisted.
-        confirmed_count: For batches > 10 SKUs, pass len(skus) after reviewing the
-            plan to confirm the write.
-        dry_run: If True (default), returns the plan without taking anything down.
-            Set to False to delete the listings on the channel.
+        skus: Exact SKUs whose listings to take down.
+        sub_source: Store or account to take the listing down from. Shopify: the
+            store name. Amazon: the account, or a regional sub-source
+            ("<account> - Germany"), which resolves to the account. TikTok: the
+            shop name.
+        channel: "Shopify" (default), "Amazon", "TikTok", "Magento" or "Walmart".
+        allow_variation_parent_takedown: Default True (see Variation groups). False
+            refuses every parent-level take-down; such children are blocked as
+            `variation_child_parent_takedown_disabled`.
+        also_retiring_skus: SKUs going away in the same operation. They count as
+            already retired when judging a variation parent, but are NOT delisted
+            themselves.
+        confirmed_count: For batches over 10, pass len(skus) after reviewing the
+            plan.
+        dry_run: Default True: returns the plan and takes nothing down.
 
     Returns:
-        A dict with:
-          - dry_run, item_count, target_channel, target_source, target_sub_source,
-            target_channel_id, sub_source_resolution, delete_proven,
-            available_sub_sources
-          - plan: one row PER TEMPLATE to be deleted (sku, covers_skus,
-            stock_item_id, template_stock_item_id, listing_sids, title,
-            template_id, configurator_id, active_listing_id, status,
-            channel_reference_id, listed_quantity, next_suggested_action, action,
-            plus via_variation_parent / variation_parent_sku /
-            variation_group_name / group_member_skus on a parent take-down)
-          - unresolved: per-SKU rows, each with a `blocked_reason` code —
-            not_found · channel_read_failed · not_listed · no_glt_template ·
+        A dict with dry_run, item_count, target_channel, target_source,
+        target_sub_source, target_channel_id, sub_source_resolution,
+        delete_proven, available_sub_sources;
+        plan: one row per template (sku, covers_skus, stock_item_id,
+            template_stock_item_id, listing_sids, title, template_id,
+            configurator_id, active_listing_id, status, channel_reference_id,
+            listed_quantity, next_suggested_action, action, plus
+            via_variation_parent / variation_parent_sku / variation_group_name /
+            group_member_skus on a parent take-down);
+        unresolved: per-SKU rows with a `blocked_reason`: not_found ·
+            channel_read_failed · not_listed · no_glt_template ·
             variation_child_live_siblings · variation_parent_has_no_template ·
-            variation_child_parent_takedown_disabled · template_locked
-          - blocked_summary / blocked_count / retirable_sku_count — so a small
-            plan against a large request cannot read as success
-          - results: per-template outcome (live run only — processed, taken_down,
-            still_listed, outcome, error)
+            variation_child_parent_takedown_disabled · template_locked;
+        blocked_summary, blocked_count, retirable_sku_count — read these, because a
+            small plan against a large request is not a success;
+        results (live run only): processed, taken_down, still_listed, outcome,
+            error.
     """
     if not skus:
         raise ValueError("skus must contain at least one SKU.")
@@ -18716,76 +18025,55 @@ def delist_all_channel_listings(
     dry_run: bool = True,
 ) -> dict:
     """
-    Take down EVERY GLT-manageable listing for each given item, across ALL
-    channels and stores/accounts it is listed on — the fan-out wrapper over
-    unpublish_channel_listing (which handles one channel+store at a time).
+    Take down EVERY GLT-manageable listing for each item, across all channels and
+    stores it is listed on. It reads each item's channel-SKU rows, groups them by
+    channel and store/account, and hands each group to unpublish_channel_listing
+    (GLT Delete). It doesn't touch the item or its stock. Items must be ACTIVE;
+    for archived items, unarchive in the Linnworks UI, run this, let the channels
+    sync, then archive_inventory_items.
 
-    Built for dead-product cleanup ("retire this product everywhere, then archive
-    it") and archived-item cleanup: UNARCHIVE items in the Linnworks UI first
-    (they must be ACTIVE — an archived SKU cannot be resolved), run this to retire
-    their listings, let the channels sync, then re-archive with
-    archive_inventory_items.
+    ⚠️ DESTRUCTIVE and customer-facing: ends real listings, and their reviews,
+    ranking and URL can't be recovered. Delete is live-proven on Shopify, Amazon
+    and TikTok (one listing each); every row carries `delete_proven`.
 
-    Per SKU it reads the channel-SKU link table, groups every listing by
-    (channel, store/account), and delegates each group to unpublish_channel_listing
-    (GLT ProcessTemplates Delete). It does NOT touch the base item or its stock.
+    ⚠️ "EVERYWHERE" IS NEVER LITERALLY TRUE. eBay, Etsy, Mirakl and CDiscount have
+    no GLT templates, and nor does any channel with no configurators in your
+    account, so those listings are reported under `skipped_channels` and LEFT UP
+    for manual take-down in the channel's own admin.
 
-    ⚠️  "EVERYWHERE" IS NEVER LITERALLY TRUE. eBay, Etsy, Mirakl and CDiscount are
-    not GLT channels — no templates — so this tool cannot END their listings;
-    they are reported under `skipped_channels` and LEFT UP for manual take-down
-    in that channel's own admin. Same for any channel with no configurators in
-    your account (often Magento/Walmart). (eBay has a separate non-GLT route for
-    REVISING a description — see `revise_ebay_listing_description` — which does
-    not help end a listing.)
+    ⚠️ Amazon's regional sub-sources ("<account> - Germany", "- Spain", …) share
+    one account and one set of templates, so they collapse into ONE take-down per
+    item and account (`covers_sub_sources`). After a live run, any region still
+    listed is reported in `still_listed_sub_sources`.
 
-    ⚠️  ONLY SHOPIFY DELETES ARE LIVE-PROVEN. Amazon/TikTok rows carry
-    delete_proven=false — prove the Delete on ONE throwaway listing per channel
-    before trusting a bulk run.
+    ⚠️ MOST DEAD VARIANTS INSIDE LIVE PRODUCTS CAN'T BE RETIRED HERE. On Shopify a
+    variant's listing belongs to its parent's template, so it can only go when
+    the whole group goes. That happens automatically when every other member is
+    dead or in this batch, and is refused (`variation_child_live_siblings`) when
+    a sibling is still listed. Expect a large `blocked_summary`; those variants
+    have to be removed on the channel. Read `blocked_reason` per SKU rather than
+    treating the take-down count as a completion rate.
 
-    ⚠️  AMAZON REGIONS SHARE ONE ACCOUNT. Amazon's regional sub-sources
-    ("My Amazon Account - Germany", "- Spain", …) all hang off one account
-    (one ChannelId) and one set of templates, so they are collapsed into a single
-    take-down per (item, account) with the regions listed under `covers_sub_sources`
-    — deleting once per region would just re-delete the same templates. After a
-    live run the tool re-reads each item's rows for that channel and reports any
-    sub-source still present under `still_listed_sub_sources`.
-
-    ⚠️  DEAD VARIANTS INSIDE LIVE PRODUCTS ARE THE COMMON CASE, and most of them
-    are NOT retirable here. A variation child's listing is owned by its parent's
-    template, so it can only be taken down by ending the whole group — done
-    automatically when every other member is dead or also in this batch, and
-    refused (with `blocked_reason="variation_child_live_siblings"`) when a
-    sibling is still listed. Sizes and colours are exactly what goes dead in a
-    catalogue, so expect a large `blocked_summary`; those variants need removing
-    on the channel side. See `unresolved[].blocked_reason` for the per-SKU reason
-    rather than reading the take-down count as a completion rate.
-
-    ⚠️  DESTRUCTIVE and customer-facing — removes real listings (reviews, ranking,
-    URL not recoverable). dry_run=True by default; staging threshold 10 on the
-    number of planned template deletions.
+    Batches over 10 planned take-downs stage: confirm with the take_down_count
+    from the dry run.
 
     Args:
-        skus: Exact SKUs / ItemNumbers (must be ACTIVE / resolvable) to delist.
-            The whole list is treated as one operation, so a variation group
-            handed in fully here is retirable even though each SKU is processed
-            separately.
-        channels: GLT channels to act on, e.g. ["Shopify", "Amazon"]. Default
-            (None) = every GLT channel that has configurators in your account.
-            Pass ["Shopify"] to keep to the live-proven path.
-        allow_variation_parent_takedown: Passed through to
-            unpublish_channel_listing. True (default) allows a whole-group
-            take-down via the variation parent when no member outside this batch
-            would lose a listing; False refuses every parent-level take-down.
-        confirmed_count: For > 10 planned take-downs, pass the take_down_count from
-            the dry-run manifest to confirm.
-        dry_run: If True (default), preview only. Set False to execute.
+        skus: Exact, ACTIVE SKUs to delist. The list is treated as one
+            operation, so a variation group passed in full can be retired.
+        channels: GLT channels to act on, e.g. ["Shopify", "Amazon"]. Default:
+            every GLT channel with configurators in your account.
+        allow_variation_parent_takedown: Passed to unpublish_channel_listing.
+            Default True; False refuses every whole-group take-down.
+        confirmed_count: For over 10 planned take-downs, the take_down_count from
+            the dry-run manifest.
+        dry_run: Default True: preview only.
 
     Returns:
-        dict with `glt_channels` (what is actionable in your account), per-SKU
-        `discovery` (targets + skipped_channels), a combined `plan` of template
-        take-downs, `unresolved` (each row carrying `blocked_reason`),
-        `blocked_summary`, and — on a live run — per-template `results` plus
-        `still_listed_sub_sources`.
+        A dict with glt_channels (what is actionable in your account), per-SKU
+        discovery (targets and skipped_channels), a combined plan of template
+        take-downs, take_down_count, unresolved (each with `blocked_reason`),
+        blocked_summary, blocked_count, retirable_sku_count, and on a live run
+        per-template results plus still_listed_sub_sources.
     """
     if not skus:
         raise ValueError("skus must contain at least one SKU.")
@@ -19366,213 +18654,87 @@ def revise_ebay_listing_description(
     dry_run: bool = True,
 ) -> dict:
     """
-    Revise an EXISTING eBay listing's description to match Linnworks' current
-    eBay-channel description for the item(s) — the first eBay write capability
-    in this server.
+    Revise an EXISTING eBay listing's description to match the item's current
+    eBay-channel description in Linnworks. Description only: it cannot create, end
+    or relist a listing. eBay is not a GLT channel (refresh_channel_listing and
+    unpublish_channel_listing refuse it), so this uses Linnworks' separate eBay
+    Listings API: GeteBayConfigurators and GeteBayTemplates to read,
+    ProcesseBayListings to write.
 
-    ⚠️  eBay is NOT a GLT channel (see NON_GLT_SOURCES) — refresh_channel_listing
-    and unpublish_channel_listing both refuse it. This tool uses a SEPARATE,
-    dedicated (non-GLT) Linnworks API family instead: Listings/GeteBayConfigurators
-    + Listings/GeteBayTemplates (read) and Listings/ProcesseBayListings (write).
-    Confirmed live 25 Aug 2026. It does NOT change what
-    refresh_channel_listing/unpublish_channel_listing can do, and it cannot
-    create, end or relist a listing — revise of an EXISTING listing's
-    description only.
+    ⚠️ NOT PROVEN TO REACH EBAY. The push was fired live on 26 Aug 2026: Linnworks
+    accepted it, but the listing did not change in two hours, while the same edit
+    made in the Linnworks listing UI landed within minutes. `revise_proven` stays
+    False, and every live row is reported `unconfirmed`, never `success`. Until
+    that changes, review the content with a dry run here and make the edit in the
+    Linnworks listing UI.
 
-    ⚠️  ACCEPTED BUT NOT OBSERVED TO PROCESS — revise_proven still False.
-    Listings/ProcesseBayListings WAS fired live on 26 Aug 2026
-    against a real listing: Linnworks
-    ACCEPTED the push (204), but across a two-hour poll of the
-    description-frame URL no channel-side effect was observed, while the
-    identical edit pushed from the Linnworks listing UI landed within
-    minutes. See EBAY_CHANNELS["ebay"]["push_observed_reason"] for the full
-    observation. A
-    `processed`/`unconfirmed` result here means Linnworks ACCEPTED the push,
-    never that the listing changed. EBAY_CHANNELS["ebay"]["revise_proven"]
-    stays False on that EVIDENCE, not on caution, until a fresh proof lands. Until then, the route
-    that works today for propagating a description edit is the Linnworks
-    listing UI — review this tool's dry-run manifest first, then make the
-    same edit there.
+    ⚠️ THE WHOLE STORED TEMPLATE IS PUSHED. Only Description is replaced; Title,
+    Price and everything else go out as Linnworks last stored them, which may be
+    out of date. Each plan row (dry run included) shows `staleness.stored_title`,
+    `staleness.stored_price` and `title_stale`, so you can see what would go live.
+    The price is shown but not checked.
 
-    ⚠️  STALE-SNAPSHOT FAMILY (v1.27.1 echo). The push sends the FULL stored
-    eBay template back with only Description swapped — Title, Price and
-    everything else on it goes live exactly as Linnworks last stored it, not
-    necessarily as it is now. So every plan row resolves the template (even
-    on a dry run) and shows `staleness.stored_title` / `staleness.stored_price`
-    plus a `title_stale` flag (title compared against the item's own current
-    title for free; price is shown but not independently re-fetched) —
-    "whatever gets pushed must be shown in the manifest", per the trap this
-    issue itself names. A live push also re-checks the template afterwards
-    (`post_push_description_matches` in each result row) — a read-back of
-    Linnworks' own stored record, not proof the live eBay listing changed.
+    ⚠️ EBAY CAN REFUSE A REVISE (active bids, a recent sale, category rules)
+    without an error: the push still returns 204. After a live push each result row
+    carries `post_push_status` and `post_push_error_message` from the stored
+    template; read them before treating `unconfirmed` as good news. This tool does
+    not act on them. `post_push_description_matches` checks Linnworks' stored copy,
+    not the live listing.
 
-    ⚠️  EBAY-SIDE REFUSAL. eBay can refuse or only partially apply a revise —
-    active bids, a recent sale, or certain category restrictions all come back
-    as a per-listing CONDITION, not a transport error, so `ProcesseBayListings`
-    still returns its ordinary 204 and this tool still reports `unconfirmed`.
-    The post-push read-back template's `Status`/`ErrorMessage` fields are the
-    only place that condition is visible to us, so each result row carries
-    them verbatim as `post_push_status` / `post_push_error_message` (None when
-    the read-back itself failed) — read them before treating an `unconfirmed`
-    row as good news; this tool does NOT interpret them or block on them.
+    ⚠️ A CHANNEL-SKU ROW PROVES A MAPPING, NOT A LIVE LISTING. Covered SKUs whose
+    mapping has never synced (LastUpdate null or 0001-01-01) are listed in
+    `never_synced_skus` with a `never_synced_warning`. They are still planned;
+    review them.
 
-    ⚠️  A CHANNEL-SKU ROW PROVES A MAPPING, NOT A LIVE LISTING. Judging "is it
-    listed" from a non-empty channel-SKU row alone repeats the v1.42.1 TikTok
-    incident (rows with LastUpdate 0001-01-01 mistaken for live channel
-    state). Each plan row carries `never_synced_skus` — covered SKUs whose
-    eBay channel-SKU row has a null/missing LastUpdate, i.e. this mapping has
-    never been confirmed by the channel — with a `never_synced_warning` when
-    non-empty. These SKUs are still planned (not auto-blocked), because a
-    never-synced mapping is a caution for review, not proof the listing is
-    dead.
+    Check results on the description frame,
+    https://vi.vipr.ebaydesc.com/itmdesc/<item_id>, not the item page, which can
+    keep showing the old description after a push has landed.
 
-    ⚠️  VERIFICATION SURFACE. Do NOT judge success from the eBay item page —
-    the description sits in a cross-origin frame there and a fresh push can
-    render as unchanged even when it landed. Check the description-frame URL
-    directly (https://vi.vipr.ebaydesc.com/itmdesc/<item_id> — see
-    EBAY_DESCRIPTION_FRAME_URL_TEMPLATE), which serves the description content
-    on its own.
+    Shop design wrapper: stored descriptions hold only the inner copy, and the
+    seller's design template adds the wrapper when a listing is pushed, so this
+    tool sends no wrapper and cannot strip one. A revise made in the Linnworks UI
+    kept the wrapper; an API push has not yet been seen to land at all.
 
-    ⚠️  MULTI-VARIATION LISTINGS. One eBay item id can cover many Linnworks
-    SKUs (eBay variations). SKUs are deduped to ONE plan row per eBay listing
-    id (the channel-SKU table's ChannelReferenceId) — a naive per-SKU loop
-    would revise the SAME listing once per covered SKU, burning revise quota
-    and making any failure impossible to attribute to one push.
+    How it works: SKUs are grouped by eBay item id (ChannelReferenceId), so a
+    multi-variation listing gets ONE push however many SKUs it covers
+    (`covers_skus`). The description is the item's eBay-channel description for
+    `store`, falling back to its default description; store names are also matched
+    by prefix, because the description table can name the store "<store>_UK". An
+    item with no usable description is blocked, never pushed empty. There is no
+    direct lookup from listing to template, so each listing's template is found by
+    sweeping the eBay configurators; that is quota-heavy, even on a dry run. A 429
+    during the sweep blocks the row as "rate_limited_locating_template" and never
+    reads as "not found". A listing whose template genuinely can't be found is
+    blocked too, so a dry run never counts a push the live run would refuse.
 
-    ⚠️  SELLER DESIGN TEMPLATE. eBay listings can render with a seller-defined
-    wrapper (headers/footers, "Check out our eBay reviews", etc.) around the
-    description. This tool ONLY ever sets the Description field of the
-    existing eBay template — Title, Attributes, Categories, Price and
-    everything else on the template are read and carried through UNCHANGED
-    (the ProcesseBayListings payload is the full existing EbayListing object
-    with only Description replaced), matching the "nulls clear omitted
-    fields" convention this codebase has hit on every other Linnworks update
-    endpoint. Live evidence (this build, 25 Aug 2026): across ~1,600 real
-    eBay templates read while building this tool, Description consistently
-    held plain inner content, byte-identical to the item's own eBay-channel
-    description row, with NO wrapper markers found in any of them —
-    supporting that Description is inner-content-only and that this risk is
-    structural (Linnworks never stores the wrapper), not something this tool
-    could accidentally strip. This has NOT been checked against a listing
-    known to use a visible design wrapper — verify on one before trusting a
-    bulk run.
-
-    Flow per SKU (read-before-write):
-      1. Resolve SKU -> StockItemId (Inventory/GetInventoryItem).
-      2. Read the channel-SKU link table (BatchGetInventoryItemChannelSKUs)
-         and keep only rows whose Source is EBAY and whose SubSource matches
-         `store` case-insensitively. No match -> not_listed.
-      3. Group matched SKUs by ChannelReferenceId (the eBay item id) — this
-         is the listing-id dedupe. One plan row per listing; covers_skus
-         lists every SKU it serves.
-      4. For each plan row, resolve the description to push: the item's own
-         eBay-channel description row for `store` (Inventory/
-         GetInventoryItemDescriptions, EBAY source), falling back to the
-         item's default (blank Source/SubSource) description row via the
-         same effective-value rule refresh_channel_listing's staleness check
-         uses (_effective_channel_value), plus an eBay-specific prefix-match
-         fallback for the "EBAY0" vs "EBAY0_UK" sub-source naming mismatch
-         (live-confirmed same tenant, same SKU). No usable
-         description on any covered SKU -> the row is `blocked` with a named
-         reason, and NOTHING is pushed with empty/default content.
-      5. For each UNBLOCKED plan row (dry run included — see the
-         stale-snapshot note above), locate the eBay template serving that
-         listing id by sweeping GeteBayConfigurators + GeteBayTemplates (no
-         direct lookup exists — see the module note above
-         _find_ebay_template_for_listing) and record its stored Title/Price
-         (`staleness`) plus whether the title looks stale. The found template
-         is cached for the rest of this call, so a live run right after does
-         NOT re-sweep for it. This sweep is the tool's heaviest quota
-         consumer; a RateLimitError here is NEVER folded into "not found" —
-         the row is bucketed into `rate_limited` (flipping `complete` false)
-         and blocked with reason "rate_limited_locating_template". A genuine
-         "no template covers this listing" (no quota issue) ALSO marks the
-         row `blocked` (reason "could not locate the eBay template serving
-         this listing id"), so the dry-run pushable count never promises a
-         push the live run would then refuse (QA round 3).
-      6. (live run only) Blocked rows (incl. both flavours above) never
-         reach Listings/ProcesseBayListings. Found -> push the full template
-         object with only Description replaced via Listings/
-         ProcesseBayListings, then re-check (config-scoped, cheap) whether
-         the template's Description now matches what was sent
-         (`post_push_description_matches`), and carry that same read-back's
-         `Status`/`ErrorMessage` through verbatim (`post_push_status` /
-         `post_push_error_message`) — eBay's own per-listing refusal (active
-         bids, a recent sale, category restrictions) surfaces there, not as a
-         call failure. A RateLimitError on THIS read-back is also bucketed
-         into `rate_limited` (`post_push_read_back_rate_limited: True`)
-         rather than silently reading as "read back found nothing".
-      7. Every live-run row that reached a push is reported `unconfirmed`
-         (never `success`) — a 204/accepted response is not evidence the
-         listing actually changed. A row blocked purely by a locate-time
-         quota failure is reported `rate_limited`, not `blocked`.
-
-    Staging: threshold 10 (the destructive tier shared with
-    unpublish_channel_listing / delist_all_channel_listings — this writes to
-    a live, customer-facing, NOT-yet-proven channel). For batches over that
-    this returns the plan + manifest and asks for confirmed_count=<N> before
-    executing.
+    Batches over 10 stage: the plan comes back first, and you confirm with
+    confirmed_count=<N>.
 
     Args:
-        skus: Exact SKUs / ItemNumbers whose eBay listing description to
-            revise.
-        store: eBay account/store identifier, matched case-insensitively
-            against the channel-SKU table's SubSource. Default "EBAY0", the usual
-            SubSource for a first eBay account; check yours with
-            get_channel_listings.
-        confirmed_count: For batches over the threshold, pass len(skus) after
-            reviewing the plan to confirm the write.
-        dry_run: If True (default), returns the plan without pushing
-            anything. A dry run makes ZERO calls to
-            Listings/ProcesseBayListings (no write). It DOES sweep
-            GeteBayConfigurators/GeteBayTemplates for each unblocked plan row
-            to preview the stored Title/Price (the stale-snapshot check) —
-            that's a read, not a write, and it's what lets the manifest show
-            what would actually be pushed.
+        skus: Exact SKUs whose eBay listing description to revise.
+        store: eBay account, matched case-insensitively against the channel-SKU
+            table's SubSource. Default "EBAY0", the usual SubSource for a first
+            eBay account; check yours with get_channel_listings.
+        confirmed_count: For batches over 10, pass len(skus) after reviewing the
+            plan.
+        dry_run: Default True. Writes nothing (no ProcesseBayListings call), but
+            does read the eBay templates to preview what would be pushed.
 
     Returns:
-        A dict with:
-          - dry_run, sku_count, store, revise_proven, push_observed_state,
-            verification_note
-          - plan: one row per eBay listing id — listing_id, covers_skus,
-            description (the value that would be/was pushed),
-            description_source (channel_override / channel_override_prefix /
-            base), blocked (bool), blocked_reason (when blocked — includes
-            "rate_limited_locating_template" when the template sweep hit the
-            Linnworks quota, and "could not locate the eBay template serving
-            this listing id" when it genuinely found nothing; both mark
-            `blocked: True` so a dry run never counts an unpushable row as
-            pushable), never_synced_skus (covered SKUs whose channel-SKU row
-            has never synced — see the trap note above), never_synced_warning
-            (when non-empty), template_found (bool|None — None when blocked
-            before resolution was attempted, or when the sweep hit a quota
-            failure), staleness (stored_title / stored_price / title_stale /
-            warning — None if the template could not be located), revise_proven
-            (from EBAY_CHANNELS — derived per row, not hard-coded, same as the
-            top-level flag), push_observed_state (from EBAY_CHANNELS — the
-            observation-state code, e.g. "accepted_but_not_processed";
-            subordinate to revise_proven, which remains the single gate)
-          - not_listed: SKUs with no matching eBay channel-SKU row for `store`
-          - unresolved: SKUs that failed to resolve
-          - rate_limited: SKUs/reads/listings that hit the Linnworks quota — a
-            429 here is NEVER folded into not_listed, unresolved, or reported
-            as "template not found"; covers SKU resolution, the channel-SKU
-            read, the description read, the template-locate sweep, and the
-            post-push read-back
-          - complete: False whenever anything landed in rate_limited
-          - results: per-row outcome (live run only) — each row's outcome is
-            one of `unconfirmed`, `blocked`, `push_failed`, `rate_limited`
-            (the last one reserved for a locate-time quota failure, so it is
-            never confused with an ordinary block); never `success`; an
-            `unconfirmed` row also carries `post_push_description_matches`
-            (bool|None), `post_push_read_back_rate_limited` (bool — True when
-            the post-push re-check itself hit the quota, so a None match
-            isn't mistaken for "read back found nothing"), `post_push_status`
-            and `post_push_error_message` (both from the read-back template
-            verbatim, None if the read-back failed) — eBay's own per-listing
-            refusal (active bids, a recent sale, category restrictions) shows
-            up here, not as an exception, and this tool does not act on it
-          - message
+        A dict with dry_run, sku_count, store, revise_proven, push_observed_state,
+        verification_note, message;
+        plan: one row per eBay listing (listing_id, covers_skus, description,
+            description_source: channel_override / channel_override_prefix / base,
+            blocked, blocked_reason, never_synced_skus, never_synced_warning,
+            template_found, staleness, revise_proven, push_observed_state);
+        not_listed: SKUs with no eBay channel-SKU row for `store`;
+        unresolved: SKUs that failed to resolve;
+        rate_limited: anything that hit the Linnworks quota, at any step (never
+            counted as not found), and complete: False when it is non-empty;
+        results (live run only): outcome unconfirmed / blocked / push_failed /
+            rate_limited (never success), post_push_description_matches,
+            post_push_read_back_rate_limited, post_push_status,
+            post_push_error_message.
     """
     if not skus:
         raise ValueError("skus must contain at least one SKU.")
@@ -20267,74 +19429,57 @@ def repair_channel_listing_images(
     dry_run: bool = True,
 ) -> dict:
     """
-    Push an item's CURRENT Linnworks images onto its EXISTING Shopify listing —
-    the one image job the Generic Listing Tool cannot do.
+    Put an item's CURRENT Linnworks images on its EXISTING Shopify listing. Use
+    it when images were corrected in Linnworks but the product page still shows
+    the old picture, is missing photos, or has the wrong hero image.
+    refresh_channel_listing can't do this: it re-sends the template's stored image
+    URL and reports success without changing anything. This tool calls the
+    Shopify Admin API directly and checks the result on Shopify.
 
-    Use this when images were corrected in Linnworks but the live product page
-    still shows the old picture, is missing photos, or has the wrong shot as its
-    hero. `refresh_channel_listing` CANNOT fix that: it re-pushes the template's
-    stored snapshot, so it re-sends the old (sometimes deleted) URL and returns a
-    success that changed nothing. This talks to the Shopify Admin API
-    directly and verifies against the storefront's own data.
+    Per SKU: read the Linnworks images, find the Shopify product through the
+    channel-SKU reference, diff the two, ATTACH what is missing and wait for
+    Shopify to finish processing it, make the Linnworks main image the featured
+    image, then DETACH media that came from Linnworks but is no longer on the
+    item. Images are matched by the Linnworks image id that Shopify keeps in the
+    file name, so it compares actual pictures, not counts.
 
-    What it does per SKU:
-      1. reads the item's current Linnworks images (ids, main flag, sort order),
-      2. finds the live Shopify product via the channel-SKU reference,
-      3. diffs Linnworks images against the product's media,
-      4. ATTACHES anything missing, waits for Shopify to finish processing it,
-      5. makes the Linnworks main image the product's featured image,
-      6. DETACHES media that came from Linnworks but is no longer on the item.
+    What it will NOT do:
+      - Remove media whose file name isn't a Linnworks image id (`unmanaged`):
+        hand-uploaded photos, size charts, lifestyle shots.
+      - Remove anything on a shared variation product unless every variant was
+        passed in `skus`. All variants share one Shopify product but keep their
+        own Linnworks images, so a sibling's photo would otherwise look
+        superseded.
+      - Remove anything before its replacement is READY, so a failed upload never
+        leaves a listing without images.
+      - Remove MORE media than it adds, unless allow_net_media_loss=True. That
+        usually means the product page holds better content (e.g. lifestyle
+        photos) than the catalogue; look at the images first.
 
-    Images are matched by GUID: Shopify's CDN filename preserves the Linnworks
-    image id, so this compares actual pictures rather than counts — the blind
-    spot that once made a push a silent no-op.
-
-    SAFETY — what it will NOT touch:
-      - Media whose filename is not a Linnworks GUID is reported as `unmanaged`
-        and never removed. That is a hand-uploaded photo, size chart or lifestyle
-        shot, and Linnworks has no opinion about it.
-      - On a VARIATION group every variant shares ONE Shopify product but keeps
-        its own Linnworks images, so a sibling's photo would otherwise look
-        superseded. The whole group's images are read first, and removal is
-        disabled for shared products unless every member was passed in `skus`.
-      - Nothing is removed unless the replacement media reached READY. A failed
-        upload leaves the old picture in place rather than emptying the listing.
-      - Removal is blocked when it would take away MORE media than it adds. That
-        is the signature of a storefront holding richer content than the catalogue
-        — live-observed on a product whose "superseded" media turned out to be
-        lifestyle photography, against incoming studio packshots. Override with
-        allow_net_media_loss=True once you have looked at the images.
-
-    Requires Shopify Admin credentials (scopes: read_products, write_products,
-    read_files, write_files) — Linnworks cannot supply these. If none are
-    configured the tool returns setup instructions and writes nothing.
-
-    Batches of more than 10 SKUs require confirmed_count=len(skus); these are
-    live customer-facing product pages.
+    Needs Shopify Admin credentials with read_products, write_products,
+    read_files and write_files. Without them it returns setup instructions and
+    writes nothing. Batches over 10 SKUs need confirmed_count=len(skus).
 
     Args:
-        skus: Exact SKUs / ItemNumbers to repair.
-        sub_source: The Shopify store, as named in Linnworks (default: LINNWORKS_DEFAULT_SHOPIFY_SUB_SOURCE). Must match a configured store.
-        remove_superseded: Detach Linnworks-origin media that is no longer on the
-            item (default True). Detach leaves the file in Shopify Files, so it
-            is recoverable. Automatically disabled for shared variation products.
-        set_featured: Make the Linnworks main image the product's featured image
-            (default True). Linnworks' own is_main does not drive Shopify.
-        allow_net_media_loss: Permit a repair that removes more media than it adds
-            (default False). Off by default because "superseded" cannot tell a
-            replaced image from one deleted out of Linnworks while still earning
-            its place on the product page.
-        confirmed_count: For batches > 10, pass len(skus) here.
-        dry_run: If True (default), returns the manifest without writing.
+        skus: Exact SKUs to repair.
+        sub_source: The Shopify store as named in Linnworks; must be a configured
+            store. Defaults to LINNWORKS_DEFAULT_SHOPIFY_SUB_SOURCE.
+        remove_superseded: Detach Linnworks media no longer on the item (default
+            True). Detached files stay in Shopify Files, so this is recoverable.
+        set_featured: Make the Linnworks main image the featured image (default
+            True). Linnworks' is_main does not set this by itself.
+        allow_net_media_loss: Allow removing more media than is added (default
+            False).
+        confirmed_count: For batches over 10, pass len(skus).
+        dry_run: Default True: returns the plan and writes nothing.
 
     Returns:
-        A dict with:
-          - sub_source, shop_domain, dry_run, item_count
-          - plan:       per-SKU diff — missing / superseded / unmanaged / matched
-                        media, featured status, and the actions that would run
-          - unresolved: SKUs not repairable here, each with a `blocked_reason`
-          - results:    per-SKU outcome (live run) — added / detached / featured,
-                        plus `in_sync` from a fresh read of the product afterwards
+        A dict with sub_source, shop_domain, dry_run, item_count;
+        plan: per-SKU diff (missing, superseded, unmanaged and matched media,
+            featured status, planned actions);
+        unresolved: SKUs not repairable here, each with a `blocked_reason`;
+        results (live run only): added, detached, featured, and `in_sync` from a
+            fresh read of the product afterwards.
     """
     if not skus:
         raise ValueError("skus is empty — nothing to repair.")

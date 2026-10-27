@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.69.5 — 27 Oct 2026
+
+- Shorter descriptions for the 20 longest tools, cutting the size of the tool definitions Claude loads by about a fifth. Every warning, parameter and response field is kept.
+- Corrected descriptions that had fallen behind the code: `relink_order_line`, `unpublish_channel_listing`, `delist_all_channel_listings`, `refund_order_lines`, `cancel_order` and `create_or_update_inventory_item`.
+- No change to what any tool does.
+
 ## 1.69.4 — 21 Oct 2026
 
 First public release as a Claude Code plugin.
